@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 import time
@@ -69,7 +70,7 @@ class DroneSimulation:
         ])
 
         # Create trajectory
-        self.drone_trajectory = Trajectory(speed=5, dt=0.05)
+        self.drone_trajectory = Trajectory(speed=5, dt=0.01)
         self.drone_trajectory.construct_trajectory(self.waypoints)
 
     def plot_initial_state(self):
@@ -254,7 +255,7 @@ class DroneSimulation:
         ax3.autoscale_view()
         ax3.set_ylim(0, np.median(self.std_devs) * 1.1)
 
-
+        self.fig.canvas.draw_idle()
 
 
     def toggle_animation(self, event):
