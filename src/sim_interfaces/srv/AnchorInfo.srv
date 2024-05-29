@@ -1,0 +1,17 @@
+# AnchorInfo.srv
+---
+string[] known_anchor_ids
+float64[] known_anchor_x_positions
+float64[] known_anchor_y_positions
+float64[] known_anchor_z_positions
+float64[] known_anchor_biases
+float64[] known_anchor_linear_biases
+float64[] known_anchor_noise_variances
+
+string[] unknown_anchor_ids
+float64[] unknown_anchor_x_positions
+float64[] unknown_anchor_y_positions
+float64[] unknown_anchor_z_positions
+float64[] unknown_anchor_biases
+float64[] unknown_anchor_linear_biases
+float64[] unknown_anchor_noise_variances

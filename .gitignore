@@ -32,3 +32,10 @@
 *.app
 
 __pycache__
+
+.vscode
+
+# ROS build folders
+/install
+/build
+/log
