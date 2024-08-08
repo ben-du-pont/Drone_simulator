@@ -8,7 +8,7 @@ import time
 
 class DroneSimulation():
 
-    def __init__(self, dt = 0.05, drone_speed = 1, number_of_waypoints = 10, bounds = [10, 10, 10]):
+    def __init__(self, dt = 0.05, drone_speed = 1, number_of_waypoints = 15, bounds = [20, 20, 20]):
         """Initialise the drone simulation class."""
 
         self.waypoints = None # Stores the main Waypoint objects of the drone trajectory
@@ -25,8 +25,8 @@ class DroneSimulation():
 
         self.number_of_waypoints = number_of_waypoints # Number of waypoints in the trajectory
 
-        self.environment_bound_x = bounds[0] # Boundaries of the environment in x direction
-        self.environment_bound_y = bounds[1] # Boundaries of the environment in y direction
+        self.environment_bound_x = bounds[0] # Boundaries of the environment in +/- x direction
+        self.environment_bound_y = bounds[1] # Boundaries of the environment in +/- y direction
         self.environment_bound_z = bounds[2] # Boundaries of the environment in z direction
 
         self.initialise_environment() # Initialise the environment, i.e. waypoints, anchors, and trajectory
@@ -55,27 +55,54 @@ class DroneSimulation():
         # Option 2 - randomly
         self.waypoints = [Waypoint(0,0,0)] + [Waypoint(x, y, z) for (x, y, z) in (np.random.random((self.number_of_waypoints-1,3))- [0.5, 0.5, 0])*[self.environment_bound_x*2, self.environment_bound_y*2, self.environment_bound_z]]
 
+        # Option 3 - two waypoints on opposite edges
+        x1 = np.random.choice([-self.environment_bound_x, self.environment_bound_x])
+        y1 = np.random.uniform(-self.environment_bound_y, self.environment_bound_y)
+        z1 = np.random.uniform(0, self.environment_bound_z)
+
+        # Place the second waypoint on the opposite edge to maximize the distance
+        x2 = -x1  # Opposite side in the x direction
+        y2 = np.random.choice([-self.environment_bound_y, self.environment_bound_y]) if abs(x1) == self.environment_bound_x else np.random.uniform(-self.environment_bound_y, self.environment_bound_y)
+        z2 = self.environment_bound_z - z1  # Opposite side in the z direction
+
+        x3 = np.random.uniform(-self.environment_bound_x/2, self.environment_bound_x/2)
+        y3 = np.random.uniform(-self.environment_bound_y/2, self.environment_bound_y/2)
+        z3 = np.random.uniform(0, self.environment_bound_z/2)
+
+        x4 = np.random.uniform(-self.environment_bound_x/2, self.environment_bound_x/2)
+        y4 = np.random.uniform(-self.environment_bound_y/2, self.environment_bound_y/2)
+        z4 = np.random.uniform(0, self.environment_bound_z/2)
+
+
+        self.waypoints = [
+            Waypoint(x1, y1, z1),
+            Waypoint(x3, y3, z3),
+            Waypoint(x4, y4, z4),
+            Waypoint(x2, y2, z2)
+        ]
+
+
         # Define the base_anchors 
         self.base_anchors = np.array([
-            Anchor("0", -1, -1, 0, bias = 5, linear_bias = 0.1, noise_variance = 0.5),
-            Anchor("1", 1, 0, 0, bias = 5, linear_bias = 0.1, noise_variance = 0.5),
-            Anchor("2", 0, 3, 0, bias = 5, linear_bias = 0.1, noise_variance = 0.5),
-            Anchor("3", 0, 6, 0, bias = 5, linear_bias = 0.1, noise_variance = 0.5)
+            Anchor("0", -1, -1, 0, bias = 5, linear_bias = 1.1, noise_variance = 0.5),
+            Anchor("1", 1, 0, 0, bias = 5, linear_bias = 1.1, noise_variance = 0.5),
+            Anchor("2", 0, 3, 0, bias = 5, linear_bias = 1.1, noise_variance = 0.5),
+            Anchor("3", 0, 6, 0, bias = 5, linear_bias = 1.1, noise_variance = 0.5)
         ])
         
         
         x = np.random.uniform(-self.environment_bound_x, self.environment_bound_x)
         y = np.random.uniform(-self.environment_bound_y, self.environment_bound_y)
-        z = np.random.uniform(0, self.environment_bound_z)
+        z = np.random.uniform(0, self.environment_bound_z*0)
 
         # Define the unknown anchors
         self.unknown_anchors = np.array([
-            Anchor("4", x, y, z, bias = 0.5, linear_bias = 0.6, noise_variance = 0.5)
+            Anchor("4", x, y, z, bias = 0.0951, linear_bias = 1.0049, noise_variance = 0.2, outlier_probability=0.2),
         ])
 
         # Create trajectory
         self.drone_trajectory = Trajectory(speed=self.drone_speed, dt=self.dt)
-        self.drone_trajectory.construct_trajectory_linear(self.waypoints)
+        self.drone_trajectory.construct_trajectory_spline(self.waypoints)
 
         self.drone_position = self.waypoints[0].get_coordinates()
 

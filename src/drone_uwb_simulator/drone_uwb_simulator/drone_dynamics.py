@@ -1,18 +1,16 @@
 import numpy as np
-import math
 
 import scipy.integrate
 from scipy.interpolate import CubicSpline
-from scipy.integrate import cumtrapz
+from scipy.integrate import cumulative_trapezoid as cumtrapz
 
-import time
-import datetime
-import threading
 
 # Kinematics 
 
 # Waypoint class to store the coordinates of points through which the drone will pass
 class Waypoint:
+    """ Represents a waypoint in 3D space."""
+
     def __init__(self, x, y, z):
         self.x = x
         self.y = y
@@ -27,10 +25,18 @@ class Waypoint:
     
 # Trajectory class to construct the trajectory based on a series of waypoints
 class Trajectory:
-    """ Constructs and visualizes a trajectory based on a series of waypoints. """
+    """ Represents a trajectory through a series of waypoint objects in 3D space.
+    The trajectory can be constructed using either a spline or linear interpolation between waypoints."""
+
     def __init__(self, speed, dt):
+        """Specify the desired speed and time interval for the trajectory helps to sample the trajectory at a constant speed. """
         self.speed = speed  # Desired speed of the drone (units per second)
         self.dt = dt        # Time interval at which to sample the trajectory
+
+        self.spline_x = np.array([])
+        self.spline_y = np.array([])
+        self.spline_z = np.array([])
+        
 
     def calculate_arc_length(self, x, y, z):
         """ Calculates the cumulative arc length of the trajectory. """

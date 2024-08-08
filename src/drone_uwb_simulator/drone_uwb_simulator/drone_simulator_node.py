@@ -1,17 +1,13 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped, TransformStamped, Quaternion, PoseStamped
+from geometry_msgs.msg import TransformStamped, Quaternion, PoseStamped
 from nav_msgs.msg import Path
-from std_msgs.msg import Float64
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Pose, Vector3
-from std_msgs.msg import ColorRGBA
 
 from sim_interfaces.srv import AnchorInfo, TrajectoryInfo
 from sim_interfaces.msg import DronePosition
 
 import tf2_ros
-import tf2_geometry_msgs
 
 import threading
 
@@ -36,9 +32,8 @@ class DroneSimulationNode(Node):
         # Subscribers
         self.optimised_trajectory_subscription = self.create_subscription(Path,'drone_optimised_trajectory', self.optimised_trajectory_callback, 10)
 
-
         # Create the drone simulation object
-        self.drone_simulation = DroneSimulation(drone_speed=5)
+        self.drone_simulation = DroneSimulation(drone_speed=3)
 
         # Fill the anchor information to be sent to the estimator in the service
         self.fill_anchor_info()
@@ -114,9 +109,15 @@ class DroneSimulationNode(Node):
         return response
     
     
+
+
     def run_simulation(self):
-        rate = self.create_rate(1/self.drone_simulation.dt)  # Publish rate of 10 Hz
+        """ Main loop for the simulation."""
+
+        rate = self.create_rate(1/self.drone_simulation.dt)  # Publish rate 
+
         self.drone_trajectory_initial = self.drone_simulation.drone_trajectory.spline_x, self.drone_simulation.drone_trajectory.spline_y, self.drone_simulation.drone_trajectory.spline_z
+        
         while rclpy.ok():
             i = 0
             self.publish_trajectory(*self.drone_trajectory_initial)

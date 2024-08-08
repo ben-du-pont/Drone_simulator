@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped, TransformStamped, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
 from sim_interfaces.msg import StampedFloat, DronePosition
 from sim_interfaces.srv import AnchorInfo, TrajectoryInfo
@@ -9,6 +9,8 @@ from nav_msgs.msg import Path
 from drone_uwb_simulator.UWB_protocol import Anchor
 from online_uwb_initialisation.uwb_online_initialisation import UwbOnlineInitialisation
 import numpy as np
+
+import tf2_ros
 
 
 class UwbOnlineInitialisationNode(Node):
@@ -31,8 +33,16 @@ class UwbOnlineInitialisationNode(Node):
         self.get_trajectory_info()
 
         self.drone_position_subscription = self.create_subscription(DronePosition, 'drone_position', self.drone_position_callback, 10)
+
         self.error_publisher = self.create_publisher(StampedFloat, 'error_in_anchor_estimate', 10)
         self.gdop_publisher = self.create_publisher(StampedFloat, 'gdop', 10)
+        self.fim_publisher = self.create_publisher(StampedFloat, 'fim', 10)
+        self.sum_of_residuals_publisher = self.create_publisher(StampedFloat, 'sum_of_residuals', 10)
+        self.condition_number_publisher = self.create_publisher(StampedFloat, 'condition_number', 10)
+        self.covariances_publisher = self.create_publisher(PoseStamped, 'covariances', 10)
+        self.number_of_measurements_publisher = self.create_publisher(StampedFloat, 'number_of_measurements', 10)
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
         self.optimised_waypoints_publisher = self.create_publisher(MarkerArray, 'optimised_waypoints', 10)
         self.optimised_trajectory_publisher = self.create_publisher(Path, 'drone_optimised_trajectory', 10)
 
@@ -105,11 +115,27 @@ class UwbOnlineInitialisationNode(Node):
         # error = self.uwb_online_initialisation.calculate_position_error(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position"], self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position"])
         error = self.uwb_online_initialisation.error
         
-        gdop = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["gdop_rough"]
-        
+        gdop = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["GDOP"][-1]
+        FIM = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["FIM"][-1]
+        sum_of_residuals = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["sum_of_residuals"][-1]
+        condition_number = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["condition_number"][-1]
+        covariances = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["covariances"][-1]
+        number_of_measurements = len(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["distances_pre_rough_estimate"]) + len(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["distances_post_rough_estimate"])
+        linear_estimated_position = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position_rough_linear"]
+        refined_estimated_position = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position_rough_non_linear"]
+
+        self.publish_unkown_anchor_estimated_pose(linear_estimated_position)
+        if len(refined_estimated_position) > 0:
+            self.publish_unkown_anchor_estimated_pose_refined(refined_estimated_position)
 
         self.publish_errors(error)
-        self.publish_gdop(gdop)
+        self.publish_GDOP(gdop)
+        self.publish_FIM(FIM)
+        self.publish_sum_of_residuals(sum_of_residuals)
+        self.publish_condition_number(condition_number)
+        self.publish_covariances(covariances)
+        self.publish_number_of_measurements(number_of_measurements)
+
         self.publish_optimised_trajectory_waypoints()
 
         if self.uwb_online_initialisation.spline_x is not None:
@@ -121,12 +147,6 @@ class UwbOnlineInitialisationNode(Node):
         error_msg.data = float(errors)
         error_msg.header.stamp = self.get_clock().now().to_msg()
         self.error_publisher.publish(error_msg)
-
-    def publish_gdop(self, gdop):
-        gdop_msg = StampedFloat()
-        gdop_msg.data = float(gdop)
-        gdop_msg.header.stamp = self.get_clock().now().to_msg()
-        self.gdop_publisher.publish(gdop_msg)
 
     def publish_optimised_trajectory_waypoints(self):
         marker_array = MarkerArray()
@@ -170,6 +190,78 @@ class UwbOnlineInitialisationNode(Node):
 
         # Publish the Path message
         self.optimised_trajectory_publisher.publish(path_msg)
+
+    def publish_GDOP(self, gdop):
+        gdop_msg = StampedFloat()
+        gdop_msg.data = float(gdop)
+        gdop_msg.header.stamp = self.get_clock().now().to_msg()
+        self.gdop_publisher.publish(gdop_msg)
+
+    def publish_FIM(self, fim):
+        fim_determinant = np.linalg.det(fim)
+        fim_msg = StampedFloat()
+        fim_msg.data = float(fim_determinant)
+        fim_msg.header.stamp = self.get_clock().now().to_msg()
+        self.fim_publisher.publish(fim_msg)
+
+    def publish_sum_of_residuals(self, sum_of_residuals):
+        sum_of_residuals_msg = StampedFloat()
+        sum_of_residuals_msg.data = float(sum_of_residuals)
+        sum_of_residuals_msg.header.stamp = self.get_clock().now().to_msg()
+        self.sum_of_residuals_publisher.publish(sum_of_residuals_msg)
+    
+    def publish_condition_number(self, condition_number):
+        condition_number_msg = StampedFloat()
+        condition_number_msg.data = float(condition_number)
+        condition_number_msg.header.stamp = self.get_clock().now().to_msg()
+        self.condition_number_publisher.publish(condition_number_msg)
+
+    def publish_covariances(self, covariances):
+        pose_msg = PoseStamped()
+        pose_msg.header.frame_id = 'world'  # Set the frame ID
+        pose_msg.header.stamp = self.get_clock().now().to_msg()  # Set the timestamp
+
+        # Set the position from the covariances data
+        pose_msg.pose.position.x = covariances[0]
+        pose_msg.pose.position.y = covariances[1]
+        pose_msg.pose.position.z = covariances[2]
+
+        # Publish the PoseStamped message
+        self.covariances_publisher.publish(pose_msg)
+
+    def publish_number_of_measurements(self, number_of_measurements):
+        number_of_measurements_msg = StampedFloat()
+        number_of_measurements_msg.data = float(number_of_measurements)
+        number_of_measurements_msg.header.stamp = self.get_clock().now().to_msg()
+        self.number_of_measurements_publisher.publish(number_of_measurements_msg)
+
+    def publish_unkown_anchor_estimated_pose(self, estimated_position):
+
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = self.get_clock().now().to_msg()
+        tf_msg.header.frame_id = 'world'
+        tf_msg.child_frame_id = f'anchor_estimated_pose'
+        tf_msg.transform.translation.x = estimated_position[0]
+        tf_msg.transform.translation.y = estimated_position[1]
+        tf_msg.transform.translation.z = estimated_position[2]
+        tf_msg.transform.rotation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
+        self.tf_broadcaster.sendTransform(tf_msg)
+
+    def publish_unkown_anchor_estimated_pose_refined(self, estimated_position):
+
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = self.get_clock().now().to_msg()
+        tf_msg.header.frame_id = 'world'
+        tf_msg.child_frame_id = f'anchor_estimated_pose_refined'
+        tf_msg.transform.translation.x = estimated_position[0]
+        tf_msg.transform.translation.y = estimated_position[1]
+        tf_msg.transform.translation.z = estimated_position[2]
+        tf_msg.transform.rotation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
+        self.tf_broadcaster.sendTransform(tf_msg)
+    
+
+
+
 
 def main(args=None):
     rclpy.init(args=args)
