@@ -59,7 +59,7 @@ class DraggablePoint:
         new_center = (center[0] + dx, center[1] + dy)
         self.point.center = new_center
         self.update_donut(new_center)
-        self.update_gdop()
+        self.update_gdop(self.anchor)
         DraggablePoint.update_intersection()  # Update intersection when any point is moved
         self.point.figure.canvas.draw_idle()
 
@@ -132,21 +132,35 @@ class DraggablePoint:
                 DraggablePoint.intersection_area_text = DraggablePoint.points[0].ax.text(0.5, 0.01, f'Intersection Area: {area:.2f}', transform=DraggablePoint.points[0].ax.transAxes, ha='center')
 
     @staticmethod
-    def update_gdop():
-        positions = np.array([point.point.center for point in DraggablePoint.points])
-        if len(positions) < 2:
-            return  # Not enough points to calculate GDOP
-        A = np.hstack((positions, np.ones((positions.shape[0], 1))))  # Augmenting with ones for affine transformations
-        try:
-            inv_at_a = np.linalg.inv(A.T @ A)
-            gdop = np.sqrt(np.trace(inv_at_a))
+    def update_gdop(anchor_pos):
+
+        def calculate_gdop(positions):
+            if len(positions) < 2:
+                return None  # Not enough points to calculate GDOP
+            A = []
+            for pos in positions:
+                x_i, y_i = pos
+                x, y = anchor_pos
+                R = np.sqrt((x_i - x)**2 + (y_i - y)**2)
+                A.append([(x_i - x)/R, (y_i - y)/R, 1])
+            A = np.array(A)
+            try:
+                inv_at_a = np.linalg.inv(A.T @ A)
+                gdop = np.sqrt(np.trace(inv_at_a))
+                return gdop
+            except np.linalg.LinAlgError:
+                return None  # Matrix is singular, cannot compute GDOP
+
+        gdop = calculate_gdop(np.array([point.point.center for point in DraggablePoint.points]))
+        if gdop is not None:
             if DraggablePoint.gdop_text:
                 DraggablePoint.gdop_text.set_text(f'GDOP: {gdop:.2f}')
             else:
                 DraggablePoint.gdop_text = DraggablePoint.points[0].ax.text(0.5, 0.95, f'GDOP: {gdop:.2f}', transform=DraggablePoint.points[0].ax.transAxes, ha='center', fontsize=12, color='red')
-        except np.linalg.LinAlgError:
-            pass  # Matrix is singular, cannot compute GDOP
-
+        else:
+            print('Not enough points to calculate GDOP')
+        
+        
 
 
 fig, ax = plt.subplots()
