@@ -7,6 +7,7 @@ from sim_interfaces.srv import AnchorInfo, TrajectoryInfo
 from nav_msgs.msg import Path
 
 from drone_uwb_simulator.UWB_protocol import Anchor
+from drone_uwb_simulator.drone_dynamics import Waypoint
 from online_uwb_initialisation.uwb_online_initialisation import UwbOnlineInitialisation
 import numpy as np
 
@@ -18,6 +19,10 @@ class UwbOnlineInitialisationNode(Node):
         super().__init__('uwb_online_initialisation_node')
         self.uwb_online_initialisation = UwbOnlineInitialisation()
 
+        self.base_anchors = {}
+        self.unknown_anchors = {}
+        self.anchor_status_dictionnary = {}
+        
         self.get_anchor_info_client = self.create_client(AnchorInfo, 'get_anchor_info')
         self.get_trajectory_info_client = self.create_client(TrajectoryInfo, 'get_trajectory_info')
 
@@ -32,6 +37,7 @@ class UwbOnlineInitialisationNode(Node):
         self.get_anchor_info()
         self.get_trajectory_info()
 
+
         self.drone_position_subscription = self.create_subscription(DronePosition, 'drone_position', self.drone_position_callback, 10)
 
         self.error_publisher = self.create_publisher(StampedFloat, 'error_in_anchor_estimate', 10)
@@ -45,6 +51,9 @@ class UwbOnlineInitialisationNode(Node):
 
         self.optimised_waypoints_publisher = self.create_publisher(MarkerArray, 'optimised_waypoints', 10)
         self.optimised_trajectory_publisher = self.create_publisher(Path, 'drone_optimised_trajectory', 10)
+
+
+
 
     def get_anchor_info(self):
         future = self.get_anchor_info_client.call_async(self.anchor_info_request)
@@ -79,7 +88,9 @@ class UwbOnlineInitialisationNode(Node):
         if future.result() is not None:
             response = future.result()
 
-            self.uwb_online_initialisation.trajectory_waypoints = [[x, y, z] for x, y, z in zip(response.waypoints_x, response.waypoints_y, response.waypoints_z)]
+            self.uwb_online_initialisation.trajectory_waypoints = [Waypoint(x, y, z) for x, y, z in zip(response.waypoints_x, response.waypoints_y, response.waypoints_z)]
+            self.uwb_online_initialisation.trajectory.construct_trajectory_spline(self.uwb_online_initialisation.trajectory_waypoints)
+
             self.uwb_online_initialisation.optimised_trajectory_waypoints = self.uwb_online_initialisation.trajectory_waypoints
 
             self.get_logger().info('Succesfully got trajectory information')
@@ -93,11 +104,19 @@ class UwbOnlineInitialisationNode(Node):
 
         for i in range(number_of_known_anchors):
             anchor = Anchor(self.known_anchor_IDs[i], self.known_anchor_x_positions[i], self.known_anchor_y_positions[i], self.known_anchor_z_positions[i], self.known_anchor_biases[i], self.known_anchor_linear_biases[i], self.known_anchor_noise_variances[i])
-            self.uwb_online_initialisation.base_anchors.append(anchor)
+            self.base_anchors[anchor.anchor_ID] = anchor
         
         for i in range(number_of_unknown_anchors):
             anchor = Anchor(self.unknown_anchor_IDs[i], self.unknown_anchor_x_positions[i], self.unknown_anchor_y_positions[i], self.unknown_anchor_z_positions[i], self.unknown_anchor_biases[i], self.unknown_anchor_linear_biases[i], self.unknown_anchor_noise_variances[i])
-            self.uwb_online_initialisation.unknown_anchors.append(anchor)
+            self.unknown_anchors[anchor.anchor_ID] = anchor
+            self.anchor_status_dictionnary[anchor.anchor_ID] = "unseen"
+
+
+
+
+    def get_anchor_range_measurement(self, drone_position, anchor_ID):
+        distance = self.unknown_anchors[anchor_ID].request_distance(drone_position[0], drone_position[1], drone_position[2])
+        return distance 
 
     def drone_position_callback(self, msg):
         drone_x = msg.position_x
@@ -108,21 +127,35 @@ class UwbOnlineInitialisationNode(Node):
 
         self.uwb_online_initialisation.drone_postion = [drone_x, drone_y, drone_z]
 
-        self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], waypoints_visited)
-        
-        first_key = next(iter(self.uwb_online_initialisation.unknown_anchor_measurements))
+        for anchor_ID in self.unknown_anchors:
+            distance = self.get_anchor_range_measurement([drone_x, drone_y, drone_z], anchor_ID)
+            self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
 
-        # error = self.uwb_online_initialisation.calculate_position_error(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position"], self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position"])
-        error = self.uwb_online_initialisation.error
+        first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
+
+        error = self.uwb_online_initialisation.calculate_position_error(self.unknown_anchors[first_key].get_anchor_coordinates(), self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator"][:3])
         
-        gdop = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["GDOP"][-1]
-        FIM = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["FIM"][-1]
-        sum_of_residuals = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["sum_of_residuals"][-1]
-        condition_number = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["condition_number"][-1]
-        covariances = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["covariances"][-1]
-        number_of_measurements = len(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["distances_pre_rough_estimate"]) + len(self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["distances_post_rough_estimate"])
-        linear_estimated_position = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position_rough_linear"]
-        refined_estimated_position = self.uwb_online_initialisation.unknown_anchor_measurements[first_key]["estimated_position_rough_non_linear"]
+        if len(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["GDOP"]) > 0:
+
+            gdop = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["GDOP"][-1]
+            FIM = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["FIM"][-1]
+            sum_of_residuals = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["residuals"][-1]
+            condition_number = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["condition_number"][-1]
+            covariances = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["covariances"][-1]
+            number_of_measurements = len(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["distances_pre_rough_estimate"]) + len(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["distances_post_rough_estimate"])
+            linear_estimated_position = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][:3]
+            refined_estimated_position = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_non_linear"][:3]
+        
+        else:
+            gdop = float('inf')
+            FIM = np.ones((3,3))*float('inf')
+            sum_of_residuals = float('inf')
+            condition_number = float('inf')
+            covariances = [float('inf'), float('inf'), float('inf')]
+            number_of_measurements = 0
+            linear_estimated_position = [float('inf'),float('inf'),float('inf')]
+            refined_estimated_position = [float('inf'),float('inf'),float('inf')]
+
 
         self.publish_unkown_anchor_estimated_pose(linear_estimated_position)
         if len(refined_estimated_position) > 0:
@@ -136,11 +169,20 @@ class UwbOnlineInitialisationNode(Node):
         self.publish_covariances(covariances)
         self.publish_number_of_measurements(number_of_measurements)
 
+        for anchor_id in self.unknown_anchors:
+            if self.uwb_online_initialisation.anchor_measurements_dictionary[anchor_id]["status"] != self.anchor_status_dictionnary[anchor_id]:
+                self.anchor_status_change_callback(anchor_id, self.uwb_online_initialisation.anchor_measurements_dictionary[anchor_id]["status"])
+
         self.publish_optimised_trajectory_waypoints()
 
         if self.uwb_online_initialisation.spline_x is not None:
             self.publish_optimised_spline(self.uwb_online_initialisation.spline_x, self.uwb_online_initialisation.spline_y, self.uwb_online_initialisation.spline_z)
             self.uwb_online_initialisation.spline_x = None
+
+    def anchor_status_change_callback(self, anchor_ID, status):
+        self.anchor_status_dictionnary[anchor_ID] = status
+        self.get_logger().warn(f"Anchor {anchor_ID} status changed to {status}")
+
 
     def publish_errors(self, errors):
         error_msg = StampedFloat()
@@ -161,9 +203,9 @@ class UwbOnlineInitialisationNode(Node):
             marker.scale.z = 0.1
             marker.color.a = 1.0
             marker.color.r = 1.0  # red color
-            marker.pose.position.x = float(point[0])
-            marker.pose.position.y = float(point[1])
-            marker.pose.position.z = float(point[2])
+            marker.pose.position.x = float(point.x)
+            marker.pose.position.y = float(point.y)
+            marker.pose.position.z = float(point.z)
             marker.id = i
             marker_array.markers.append(marker)
 
@@ -190,6 +232,8 @@ class UwbOnlineInitialisationNode(Node):
 
         # Publish the Path message
         self.optimised_trajectory_publisher.publish(path_msg)
+
+
 
     def publish_GDOP(self, gdop):
         gdop_msg = StampedFloat()
@@ -234,6 +278,8 @@ class UwbOnlineInitialisationNode(Node):
         number_of_measurements_msg.data = float(number_of_measurements)
         number_of_measurements_msg.header.stamp = self.get_clock().now().to_msg()
         self.number_of_measurements_publisher.publish(number_of_measurements_msg)
+
+
 
     def publish_unkown_anchor_estimated_pose(self, estimated_position):
 

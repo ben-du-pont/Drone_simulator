@@ -28,7 +28,7 @@ class Trajectory:
     """ Represents a trajectory through a series of waypoint objects in 3D space.
     The trajectory can be constructed using either a spline or linear interpolation between waypoints."""
 
-    def __init__(self, speed, dt):
+    def __init__(self, speed = 3, dt = 0.05):
         """Specify the desired speed and time interval for the trajectory helps to sample the trajectory at a constant speed. """
         self.speed = speed  # Desired speed of the drone (units per second)
         self.dt = dt        # Time interval at which to sample the trajectory

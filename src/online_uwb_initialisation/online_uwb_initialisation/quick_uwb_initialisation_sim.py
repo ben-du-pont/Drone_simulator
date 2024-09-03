@@ -5,25 +5,23 @@ from drone_uwb_simulator.drone_dynamics import Waypoint, Trajectory
 from online_uwb_initialisation.uwb_online_initialisation import UwbOnlineInitialisation
 from online_uwb_initialisation.trajectory_optimisation import TrajectoryOptimization
 
+
+import pandas as pd
 import numpy as np
-import csv
-import json
-
 import random
-from scipy.spatial.transform import Rotation as R
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import gridspec
 
+import csv
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+import time
 
-from scipy.spatial import distance
+import copy
 
-
-
-import pandas as pd
-
+import time 
 
 package_path = Path(__file__).parent.resolve()
 csv_dir = package_path / 'csv_files'
@@ -46,29 +44,42 @@ class CalculateOnlineInitialisation:
         # Initialise the measurement vector and the ground truth measurement vector
         self.measurement_vector = []
         self.measurement_vector_gt = []
+        self.measurement_vector_optimal = []
 
         # Initialise the vectors for the stopping criterion metrics
         self.gdop_vector = []
         self.fim_vector = []
         self.condition_number_vector = []
         self.covariances_vector = []
-        self.sum_of_residuals_vector = []
+        self.residuals_vector = []
+        self.verifications_vector = []
+        self.pos_delta_vector = []
+
+        self.weight_vector = []
+
+        self.number_of_measurements = 0
 
         # Initialise the error vector
         self.error_vector = []
+        self.constant_bias_vector = []
+        self.linear_bias_vector = []
 
+        self.constant_bias_error_vector = []
+        self.linear_bias_error_vector = []
+
+        self.full_trajectory_x, self.full_trajectory_y, self.full_trajectory_z = [], [], []
 
     def randomise_environment(self):
         """Function to randomise the environment by adjusting the anchor parameters and the measurement collection procedure."""
 
         # Randomise the anchor
         self.drone_sim.unknown_anchors[0].bias = random.uniform(0, 1)
-        self.drone_sim.unknown_anchors[0].linear_bias = random.uniform(1, 1.5)
-        self.drone_sim.unknown_anchors[0].noise_variance = random.uniform(0, 0.2)
+        self.drone_sim.unknown_anchors[0].linear_bias = random.uniform(1, 1.2)
+        self.drone_sim.unknown_anchors[0].noise_variance = random.uniform(0, 0.5)
         self.drone_sim.unknown_anchors[0].outlier_probability = random.uniform(0, 0.3)
 
         # Randomise the measurement collection delta
-        self.uwb_online_initialisation.params['distance_to_anchor_ratio_threshold'] = random.uniform(0.01, 0.05)
+        self.uwb_online_initialisation.params['distance_to_anchor_ratio_threshold'] = 0.03 #random.uniform(0.01, 0.05)
 
     def reset_metrics(self, anchor_id):
         """Reset the metrics vectors and the measurement vector.
@@ -77,269 +88,406 @@ class CalculateOnlineInitialisation:
         anchor_id (int): The ID of the anchor for which the metrics are computed amd should be reset.
         """
         self.measurement_vector = []
+        self.measurement_vector_gt = []
+        self.measurement_vector_optimal = []
 
         self.gdop_vector = []
         self.fim_vector = []
         self.condition_number_vector = []
         self.covariances_vector = []
-        self.sum_of_residuals_vector = []
+        self.residuals_vector = []
+        self.verifications_vector = []
+        self.pos_delta_vector = []
+
+        self.error_vector = []
+        self.constant_bias_error_vector = []
+        self.linear_bias_error_vector = []
+        self.constant_bias_vector = []
+        self.linear_bias_vector = []
+
+        self.number_of_measurements = 0
+
+        self.weight_vector = []
 
         self.uwb_online_initialisation.reset_all_measurements(anchor_id)
 
-    def gather_measurements(self):
-        """Function to gather measurements from the drone trajectory and the unknown anchors.
-        The measurements are stored in the unknown_anchor_measurements dictionary in the UwbOnlineInitialisation object.
-        They are also preprocessed, i.e only added if they are within the distance_to_anchor_ratio_threshold and close enough to the drone."""
+
+
+    def gather_measurements(self, anchor_id):
+
+        measurement_vector = []
+        self.full_trajectory_x, self.full_trajectory_y, self.full_trajectory_z = self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z
+        for p_x, p_y, p_z in zip(self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z):
+            
+            # Request the distance to the anchor
+            anchor = next((anchor for anchor in self.drone_sim.unknown_anchors if anchor.anchor_ID == anchor_id), None)
+            distance = anchor.request_distance(p_x, p_y, p_z)
+
+            measurement_vector.append([p_x, p_y, p_z, distance])
+            
+        return measurement_vector
+
+    def gather_measurements_ground_truth(self, anchor_id):
+        measurement_vector = []
 
         for p_x, p_y, p_z in zip(self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z):
+            
+            # Request the distance to the anchor
+            anchor = next((anchor for anchor in self.drone_sim.unknown_anchors if anchor.anchor_ID == anchor_id), None)
+            distance = np.linalg.norm(np.array([p_x, p_y, p_z]) - np.array(anchor.get_anchor_coordinates()))
+
+            measurement_vector.append([p_x, p_y, p_z, distance])
+            
+        return measurement_vector
+
+    # THIS IS THEORETICALLY NO LONGER NEEDED
+    def gather_measurements_on_optimal_trajectory(self, trajectory, anchor_id):
+    
+        """Function to gather measurements from the drone trajectory and the unknown anchors.
+        The measurements are stored in the unknown_anchor_measurements dictionary in the UwbOnlineInitialisation object.
+        They are also preprocessed, i.e only added if they are within the distance_to_anchor_ratio_threshold and close enough to the drone.
+        It also adds the measurements to the measurement vector_optimal for the optimal trajectory."""
+
+        for p_x, p_y, p_z in zip(trajectory.spline_x, trajectory.spline_y, trajectory.spline_z):
             _, unknown_anchor_distances = self.uwb_online_initialisation.get_distance_to_anchors(p_x, p_y, p_z)
             drone_position = [p_x, p_y, p_z]
             # Iterate over the unkown anchors in range
             for distance, anchor_id in unknown_anchor_distances: 
-                self.uwb_online_initialisation.process_measurement(drone_position, distance, anchor_id)
-
-    def gather_measurements_ground_truth(self):
-        """Function to gather measurements from the drone trajectory and the unknown anchors, using the ground truth distance (no bias and no noise).
-        The measurements are stored in the unknown_anchor_measurements dictionary in the UwbOnlineInitialisation object.
-        They are also preprocessed, i.e only added if they are within the distance_to_anchor_ratio_threshold."""
-
-        for p_x, p_y, p_z in zip(self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z):
-            _, unknown_anchor_distances = self.uwb_online_initialisation.get_distance_to_anchors_gt(p_x, p_y, p_z)
-            drone_position = [p_x, p_y, p_z]
-            # Iterate over the unkown anchors in range
-            for distance, anchor_id in unknown_anchor_distances: 
-                self.uwb_online_initialisation.process_measurement(drone_position, distance, anchor_id)
+                self.uwb_online_initialisation.process_measurement_optimal_trajectory(drone_position, distance, anchor_id)
 
 
+        drone_positions = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["positions_post_rough_estimate"]
+        range_measurements = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["distances_post_rough_estimate"]
 
-
-
-
-    def gather_metrics(self, anchor_id):
-        """Run the pipeline on the measurements to iteratively estimate the anchor position and compute the stopping criterion variables.
-        Store the stopping criterion metrics in the corresponding vectors.
-        
-        Parameters:
-        anchor_id (int): The ID of the anchor for which the metrics are computed.
-        """
-        
-        # Extract the drone positions and range measurements for the anchor from the unknown_anchor_measurements dictionary in the UwbOnlineInitialisation object
-        drone_positions = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["positions_pre_rough_estimate"]
-        range_measurements = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["distances_pre_rough_estimate"]
-
-        # Run the pipleline
         for i in range(len(drone_positions)):
 
             # Append the measurement to the measurement vector
-            self.measurement_vector.append([drone_positions[i][0], drone_positions[i][1], drone_positions[i][2], range_measurements[i]])
+            self.measurement_vector_optimal.append([drone_positions[i][0], drone_positions[i][1], drone_positions[i][2], range_measurements[i]])
 
-            # Check if there are enough measurements to run the linear least squares estimation and compute metrics
-            if len(self.measurement_vector) > 5:
-
-                # Run the linear least squares estimation to compute the estimate, the covariance matrix and the residuals
-                estimator, covariance_matrix, residuals, _ = self.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(self.measurement_vector)
-
-                # Compute the stopping criterion variables
-                FIM = self.uwb_online_initialisation.compute_FIM(self.measurement_vector, estimator[:3])
-                GDOP = self.uwb_online_initialisation.compute_GDOP(self.measurement_vector, estimator[:3])
-                sum_of_residuals = np.mean(residuals)
-                condition_number = self.uwb_online_initialisation.compute_condition_number(self.measurement_vector)
-                covariances = np.diag(covariance_matrix)
-
-                error = self.uwb_online_initialisation.calculate_position_error(0, estimator[:3])
-
-                self.gdop_vector.append(GDOP)
-                self.fim_vector.append(np.linalg.det(FIM))
-                self.condition_number_vector.append(condition_number)
-                self.covariances_vector.append(covariances)
-                self.sum_of_residuals_vector.append(sum_of_residuals)
-                self.error_vector.append(error)
-
-            else: # If there are not enough measurements, append NaN values to the vectors
-                self.gdop_vector.append(np.nan)
-                self.fim_vector.append(np.nan)
-                self.condition_number_vector.append(np.nan)
-                self.covariances_vector.append([np.nan, np.nan, np.nan])
-                self.sum_of_residuals_vector.append(np.nan)
-                self.error_vector.append(np.nan)
-
-    def gather_metrics_with_outlier_filtering(self, anchor_id):
-        """Run the pipeline on the measurements to iteratively estimate the anchor position and compute the stopping criterion variables.
-        Store the stopping criterion metrics in the corresponding vectors whilst removing outliers from the measurements."""
-
-        # Extract the drone positions and range measurements for the anchor from the unknown_anchor_measurements dictionary in the UwbOnlineInitialisation object
-        drone_positions = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["positions_pre_rough_estimate"]
-        range_measurements = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["distances_pre_rough_estimate"]
-
-        # Run the pipleline
-        for i in range(len(drone_positions)):
-
-            # Append the measurement to the measurement vector
-            self.measurement_vector.append([drone_positions[i][0], drone_positions[i][1], drone_positions[i][2], range_measurements[i]])
-
-            # Check if there are enough measurements to run the linear least squares estimation and compute metrics
-            if len(self.measurement_vector) > 5:
-
-                # Run the linear least squares estimation to compute the estimate, the covariance matrix and the residuals
-                estimator, covariance_matrix, residuals, _ = self.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(self.measurement_vector)
-
-                # Compute the stopping criterion variables
-                FIM = self.uwb_online_initialisation.compute_FIM(self.measurement_vector, estimator[:3])
-                GDOP = self.uwb_online_initialisation.compute_GDOP(self.measurement_vector, estimator[:3])
-                sum_of_residuals = np.mean(residuals)
-                condition_number = self.uwb_online_initialisation.compute_condition_number(self.measurement_vector)
-                covariances = np.diag(covariance_matrix)
-
-                error = self.uwb_online_initialisation.calculate_position_error(0, estimator[:3])
-
-                self.gdop_vector.append(GDOP)
-                self.fim_vector.append(np.linalg.det(FIM))
-                self.condition_number_vector.append(condition_number)
-                self.covariances_vector.append(covariances)
-                self.sum_of_residuals_vector.append(sum_of_residuals)
-                self.error_vector.append(error)
-
-                # Find outliers in the residuals and remove them from the measurement vector
-                outliers = self.uwb_online_initialisation.outlier_finder(residuals)
-                for outlier in outliers[::-1]:
-                    self.measurement_vector.pop(outlier)
-
-            else: # If there are not enough measurements, append NaN values to the vectors
-                self.gdop_vector.append(np.nan)
-                self.fim_vector.append(np.nan)
-                self.condition_number_vector.append(np.nan)
-                self.covariances_vector.append([np.nan, np.nan, np.nan])
-                self.sum_of_residuals_vector.append(np.nan)
-                self.error_vector.append(np.nan)
+        return self.measurement_vector_optimal
 
     
+    def write_settings(self, setting):
 
 
 
-    def run_simulation(self):
-        """Run a simulation by gathering measurements and metrics for the unknown anchor, using all space and all measurement available. (no stopping criterion)"""
+        if setting.startswith("filtered"):
+            self.uwb_online_initialisation.params['outlier_removing'] = "counter"
 
-        self.uwb_online_initialisation.process_anchor_info(self.drone_sim.base_anchors, self.drone_sim.unknown_anchors)
+        else:
+            self.uwb_online_initialisation.params['outlier_removing'] = "None"
+            
+        if setting == "linear_no_bias":
 
-        unknown_anchor = self.drone_sim.unknown_anchors[0]
-        self.reset_metrics(unknown_anchor.anchor_ID)
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
+            
+        elif setting == "linear_constant_bias":
 
-        self.gather_measurements() # Gather measurements (keep them stored in the UwbOnlineInitialisation object)
-        self.gather_metrics(unknown_anchor.anchor_ID) # Gather metrics
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
 
-    def run_simulation_ground_truth(self):
-        """Run a simulation by gathering measurements and metrics for the unknown anchor, using all space and all measurement available. (no stopping criterion)
-        The measurements are gathered using the ground truth distance (no bias and no noise)."""
+        elif setting == "linear_linear_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
 
-        self.uwb_online_initialisation.process_anchor_info(self.drone_sim.base_anchors, self.drone_sim.unknown_anchors)
+        elif setting == "linear_both_biases":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
 
-        unknown_anchor = self.drone_sim.unknown_anchors[0]
-        self.reset_metrics(unknown_anchor.anchor_ID)
 
-        self.gather_measurements() # Gather measurements (keep them stored in the UwbOnlineInitialisation object)
-        self.gather_metrics(unknown_anchor.anchor_ID) # Gather metrics
 
-    def run_simulation_outlier_filtering(self):
-        """Run a simulation by gathering measurements and metrics for the unknown anchor, using all space and all measurement available. (no stopping criterion)
-        The measurements are gathered by simultaneously removing outliers from the measurements."""
+        elif setting == "reweighted_linear_no_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
 
-        self.uwb_online_initialisation.process_anchor_info(self.drone_sim.base_anchors, self.drone_sim.unknown_anchors)
+        elif setting == "reweighted_linear_constant_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
 
-        unknown_anchor = self.drone_sim.unknown_anchors[0]
-        self.reset_metrics(unknown_anchor.anchor_ID)
+        elif setting == "reweighted_linear_linear_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
 
-        self.gather_measurements() # Gather measurements (keep them stored in the UwbOnlineInitialisation object)
-        self.gather_metrics_with_outlier_filtering(unknown_anchor.anchor_ID) # Gather metrics
+        elif setting == "reweighted_linear_both_biases":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
 
-    def use_stopping_criterion(self, metric='gdop', threshold=2):
-        """Function to use a stopping criterion to extract a subset of the measurements.
 
-        Parameters:
-        metric (str): The metric to use for the stopping criterion. Can be 'gdop', 'fim', 'condition_number', 'covariance', or 'sum_of_residuals'.
-        threshold (float): The threshold value for the stopping criterion.
+
+        elif setting == "filtered_linear_no_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
+
+        elif setting == "filtered_linear_constant_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
+
+        elif setting == "filtered_linear_linear_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
+
+        elif setting == "filtered_linear_both_biases":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "simple_linear"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
+
+
+
+        elif setting == "filtered_reweighted_linear_no_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
+
+        elif setting == "filtered_reweighted_linear_constant_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = False
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
+
+        elif setting == "filtered_reweighted_linear_linear_bias":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = False
+            
+
+        elif setting == "filtered_reweighted_linear_both_biases":
+            
+            self.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted"
+            self.uwb_online_initialisation.params['use_linear_bias'] = True
+            self.uwb_online_initialisation.params['use_constant_bias'] = True
+            
+        else:
+            pass
+
         
-        Returns:
-        measurement_vector (list): The subset of measurements that satisfy the stopping criterion.
 
 
-        Good values for the threshold:
-        - gdop: 2
-        - fim: 2
-        - condition_number: 500
-        - covariance: 0.1
-        - sum_of_residuals: 1
+    def run_pipeline_pre_optimisation(self, measurement_vector=None):
 
-        """
+        self.randomise_environment()
 
-        if metric == 'gdop':
-            # Extract measurement vector until the corresponding gdop is below a certain threshold = 2
-            gdop_index = np.where(np.array(self.gdop_vector) < threshold)[0][0]
-            measurement_vector = self.measurement_vector[:gdop_index]
+        for anchor in self.drone_sim.unknown_anchors:
+            self.reset_metrics(anchor.anchor_ID)
 
-        elif metric == 'fim':
-            # Extract measurement vector until the corresponding fim is below a certainn threshold = 2
-            fim_index = np.where(1/np.linalg.det(np.array(self.fim_vector)) < threshold)[0][0]
-            measurement_vector = self.measurement_vector[:fim_index]
 
+        self.uwb_online_initialisation.trajectory = self.drone_sim.drone_trajectory
+
+
+        for iteration, (drone_x, drone_y, drone_z) in enumerate(zip(self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z)):
+            first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
+            if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] == "optimised_trajectory":
+                break
+            else:
+                self.uwb_online_initialisation.drone_postion = [drone_x, drone_y, drone_z]
+
+                if measurement_vector is None:
+                    for anchor in self.drone_sim.unknown_anchors:
+                        anchor_ID = anchor.anchor_ID
+                        distance = anchor.request_distance(drone_x, drone_y, drone_z)
+                        self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
+                else:
+                    drone_x, drone_y, drone_z, distance = measurement_vector[iteration]
+                    self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
+
+
+                # Compute the stopping criterion variables
+                FIM = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["FIM"]
+                GDOP = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["GDOP"]
+                mean_residuals = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["residuals"]
+                condition_number = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["condition_number"]
+                covariances = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["covariances"]
+                weights = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["linear_ls_weights"]
+                verification_value = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["verification_vector"]
+                position_delta = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["consecutive_distances_vector"]
+
+
+                error = self.uwb_online_initialisation.calculate_position_error(self.drone_sim.unknown_anchors[0].get_anchor_coordinates(), self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][:3])
+                constant_bias_error = np.linalg.norm(self.drone_sim.unknown_anchors[0].bias - self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][3])
+                linear_bias_error = np.linalg.norm(self.drone_sim.unknown_anchors[0].linear_bias - self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][4])
+
+                self.gdop_vector = GDOP
+                self.fim_vector = FIM
+                self.condition_number_vector = condition_number
+                self.covariances_vector = covariances
+                self.residuals_vector = mean_residuals
+                self.weight_vector = weights
+                self.verifications_vector = verification_value
+                self.pos_delta_vector = position_delta
+
+
+                if self.number_of_measurements < len(condition_number):
+                    self.error_vector.append(error)
+                    self.constant_bias_error_vector.append(constant_bias_error)
+                    self.linear_bias_error_vector.append(linear_bias_error)
+                    self.constant_bias_vector.append(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][3])
+                    self.linear_bias_vector.append(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][4])
+                    
+                    self.measurement_vector.append([drone_x, drone_y, drone_z, distance])
+                    self.number_of_measurements += 1
+
+        if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] != "optimised_trajectory":
+            
+            anchor_measurement_dictionary = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]
+            measurements = []
+            for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):
+                x, y, z = position
+                measurements.append([x, y, z, distance])
+
+            estimator, covariance_matrix = self.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(measurements, initial_guess=anchor_measurement_dictionary["estimator_rough_linear"])
+
+            # Update the dictionnary with the non-linear refined rough estimate
+            anchor_measurement_dictionary["estimator_rough_non_linear"] = estimator
+            anchor_measurement_dictionary["estimator"] = estimator
+
+        # From here the initialisation is finished, the non_linear method is doneand the optimisation is done
+
+    def run_pipeline_post_optimisation(self):
+        for drone_x, drone_y, drone_z in zip(self.uwb_online_initialisation.spline_x_optimal, self.uwb_online_initialisation.spline_y_optimal, self.uwb_online_initialisation.spline_z_optimal):
+            first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
+
+
+            if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] == "initialised":
+                break
+            else:
+                self.uwb_online_initialisation.drone_postion = [drone_x, drone_y, drone_z]
+
+                for anchor in self.drone_sim.unknown_anchors:
+                    anchor_ID = anchor.anchor_ID
+                    distance = anchor.request_distance(drone_x, drone_y, drone_z)
+                    self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
+
+    def run_pipeline_full(self, measurement_vector=None):
+
+        self.randomise_environment()
+
+        for anchor in self.drone_sim.unknown_anchors:
+            self.reset_metrics(anchor.anchor_ID)
+
+
+        self.uwb_online_initialisation.trajectory = self.drone_sim.drone_trajectory
+
+
+        for iteration, (drone_x, drone_y, drone_z) in enumerate(zip(self.drone_sim.drone_trajectory.spline_x, self.drone_sim.drone_trajectory.spline_y, self.drone_sim.drone_trajectory.spline_z)):
+            first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
+            if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] == "optimised_trajectory":
+                break
+            else:
+                self.uwb_online_initialisation.drone_postion = [drone_x, drone_y, drone_z]
+
+                if measurement_vector is None:
+                    for anchor in self.drone_sim.unknown_anchors:
+                        anchor_ID = anchor.anchor_ID
+                        distance = anchor.request_distance(drone_x, drone_y, drone_z)
+                        self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
+                else:
+                    drone_x, drone_y, drone_z, distance = measurement_vector[iteration]
+                    self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
+
+
+                # Compute the stopping criterion variables
+                FIM = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["FIM"]
+                GDOP = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["GDOP"]
+                mean_residuals = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["residuals"]
+                condition_number = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["condition_number"]
+                covariances = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["covariances"]
+                weights = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["linear_ls_weights"]
+                verification_value = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["verification_vector"]
+                position_delta = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["consecutive_distances_vector"]
+
+
+                error = self.uwb_online_initialisation.calculate_position_error(self.drone_sim.unknown_anchors[0].get_anchor_coordinates(), self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][:3])
+                constant_bias_error = np.linalg.norm(self.drone_sim.unknown_anchors[0].bias - self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][3])
+                linear_bias_error = np.linalg.norm(self.drone_sim.unknown_anchors[0].linear_bias - self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][4])
+
+                self.gdop_vector = GDOP
+                self.fim_vector = FIM
+                self.condition_number_vector = condition_number
+                self.covariances_vector = covariances
+                self.residuals_vector = mean_residuals
+                self.weight_vector = weights
+                self.verifications_vector = verification_value
+                self.pos_delta_vector = position_delta
+
+
+                if self.number_of_measurements < len(condition_number):
+                    self.error_vector.append(error)
+                    self.constant_bias_error_vector.append(constant_bias_error)
+                    self.linear_bias_error_vector.append(linear_bias_error)
+                    self.constant_bias_vector.append(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][3])
+                    self.linear_bias_vector.append(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator_rough_linear"][4])
+                    
+                    self.measurement_vector.append([drone_x, drone_y, drone_z, distance])
+                    self.number_of_measurements += 1
+
+        if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] != "optimised_trajectory":
+            anchor_measurement_dictionary = self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]
+            measurements = []
+            for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):
+                x, y, z = position
+                measurements.append([x, y, z, distance])
+
+            estimator, covariance_matrix = self.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(measurements, initial_guess=anchor_measurement_dictionary["estimator_rough_linear"])
+
+            # Update the dictionnary with the non-linear refined rough estimate
+            anchor_measurement_dictionary["estimator_rough_non_linear"] = estimator
+            anchor_measurement_dictionary["estimator"] = estimator
         
-        elif metric == 'condition_number':
-            # Extract measurement vector until the corresponding condition number is below a certain threshold = 2
-            condition_number_index = np.where(np.array(self.condition_number_vector) < threshold)[0][0]
-            measurement_vector = self.measurement_vector[:condition_number_index]
+        else:
+            for drone_x, drone_y, drone_z in zip(self.uwb_online_initialisation.spline_x_optimal, self.uwb_online_initialisation.spline_y_optimal, self.uwb_online_initialisation.spline_z_optimal):
+                first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
 
-        elif metric == 'covariance':
-            # Extract measurement vector until the corresponding covariance is below a certain threshold = 0.1
-            max_values = [np.min(triplet[:3]) for triplet in self.covariances_vector]
+                
+                if self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["status"] == "initialised":
+                    break
+                else:
+                    self.uwb_online_initialisation.drone_postion = [drone_x, drone_y, drone_z]
 
-            # Convert max values to a NumPy array for easy indexing
-            max_values_array = np.array(max_values)
-            # Find indices where the maximum value is below 0.1
-            cov_index = np.where(max_values_array < threshold)[0][0]
-            measurement_vector = self.measurement_vector[:cov_index]
+                    for anchor in self.drone_sim.unknown_anchors:
+                        anchor_ID = anchor.anchor_ID
+                        distance = anchor.request_distance(drone_x, drone_y, drone_z)
+                        self.uwb_online_initialisation.measurement_callback([drone_x, drone_y, drone_z], distance, anchor_ID)
 
-        elif metric == 'sum_of_residuals':
-            # Extract measurement vector until the corresponding sum of residuals is below a certain threshold = 0.1
-            sum_of_residuals_index = np.where(np.array(self.sum_of_residuals_vector) < threshold)[0][0]
-            measurement_vector = self.measurement_vector[:sum_of_residuals_index]
+                
 
-        elif metric == None:
-            measurement_vector = self.measurement_vector
-        
-        return measurement_vector
-
-
-
-        
-
-    def write_measurements_to_csv(self, path):
-        """Function to create some data with measurements and write it to a CSV file."""
-        # Open a CSV file in append mode
-        anchor_id = self.drone_sim.unknown_anchors[0].anchor_ID
-
-        row = [str(self.drone_sim.unknown_anchors[0].get_anchor_coordinates()), str(self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["positions_pre_rough_estimate"]), str(self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["distances_pre_rough_estimate"])]
-        
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
-
-    def load_measurement_data_from_csv(self, path):
-
-        def convert_str_to_list(s):
-            # Replace 'nan', 'inf', and '-inf' with their corresponding numpy constants
-            s = s.replace('nan', 'np.nan').replace('inf', 'np.inf').replace('-inf', '-np.inf')
-            # Evaluate the string as a Python expression and return the result
-            try:
-                return eval(s)
-            except Exception as e:
-                # If evaluation fails, return the original string
-                return s
-    
-        data = pd.read_csv(path, header=None, converters={i: convert_str_to_list for i in range(3)})
-        data.columns = ['anchor_position_gt','measured_positions', 'measured_ranges']
-
-        return data
-
+        # From here the initialisation is finished, the non_linear method is doneand the optimisation is done
 
 
 
@@ -416,247 +564,39 @@ class CalculateOnlineInitialisation:
         return azimuthal_span_degrees, elevation_span_degrees
 
 
-    def run_residual_analysis(self):
+    def write_measurements_to_csv(self, path):
+        """Function to create some data with measurements and write it to a CSV file."""
+        # Open a CSV file in append mode
+        anchor_id = self.drone_sim.unknown_anchors[0].anchor_ID
 
-        self.randomise_environment()
-        self.uwb_online_initialisation.process_anchor_info(self.drone_sim.base_anchors, self.drone_sim.unknown_anchors)
-
-        unknown_anchor = self.drone_sim.unknown_anchors[0]
-
-        self.reset_metrics(unknown_anchor.anchor_ID)
-
-        self.gather_measurements()
-        anchor_id = unknown_anchor.anchor_ID
-        drone_positions = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["positions_pre_rough_estimate"]
-        range_measurements = self.uwb_online_initialisation.unknown_anchor_measurements[anchor_id]["distances_pre_rough_estimate"]
-
-        residual_vector = []
-        for i in range(len(drone_positions)):
-            self.measurement_vector.append([drone_positions[i][0], drone_positions[i][1], drone_positions[i][2], range_measurements[i]])
-
-            if len(self.measurement_vector) > 5:
-                # Run the linear least squares estimation and compute the residuals
-                estimator, covariance_matrix, residuals, x = self.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(self.measurement_vector)
-
-                residual_vector.append(residuals)
-
-
-
-
-        self.print_high_residual_measurements(np.array(drone_positions), residual_vector[-1], range_measurements, unknown_anchor.get_anchor_coordinates(), x)
-
+        row = [str(self.drone_sim.unknown_anchors[0].get_anchor_coordinates()), str(self.uwb_online_initialisation.anchor_measurements_dictionary[anchor_id]["positions_pre_rough_estimate"]), str(self.uwb_online_initialisation.anchor_measurements_dictionary[anchor_id]["distances_pre_rough_estimate"])]
         
-        #self.plot_colored_residuals(unknown_anchor.get_anchor_coordinates(), np.array(drone_positions), residual_vector[-1], estimator[:3])
+        # Open a CSV file in append mode
+        with open(path, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(row)
 
+    def load_measurement_data_from_csv(self, path):
 
-
-
-
-    def plot_colored_residuals(self, ground_truth, measurements, residuals, estimated_position):
-        # Normalize residuals for color mapping
-        norm = plt.Normalize(residuals.min(), residuals.max())
-
-        # Create a figure with two subplots: 3D scatter plot and residuals plot
-        fig = plt.figure(figsize=(12, 6))
-
-        # Subplot 1: 3D Scatter Plot
-        ax1 = fig.add_subplot(121, projection='3d')
-        ax1.scatter(ground_truth[0], ground_truth[1], ground_truth[2], c='r', marker='o', s=100, label='Ground Truth')
-        
-        scatter = ax1.scatter(measurements[:, 0], measurements[:, 1], measurements[:, 2], 
-                            c=residuals, cmap='coolwarm', norm=norm, s=50)  # Changed colormap to coolwarm
-
-        # Add color bar to show the scale of residuals
-        cbar = plt.colorbar(scatter, ax=ax1, shrink=0.5, aspect=5)
-        cbar.set_label('Residual Magnitude')
-
-        # Plot estimated position
-        ax1.scatter(estimated_position[0], estimated_position[1], estimated_position[2], c='g', marker='^', s=100, label='Estimated Position')
-
-        # Calculate the error between the estimated position and the ground truth
-        error = np.linalg.norm(estimated_position - ground_truth)
-
-        # Add text for the error
-        ax1.text(estimated_position[0], estimated_position[1], estimated_position[2], 
-                f'Error: {error:.2f} m', color='black', fontsize=12)
-
-        # Set plot labels
-        ax1.set_xlabel('X')
-        ax1.set_ylabel('Y')
-        ax1.set_zlabel('Z')
-        ax1.set_title('3D Scatter Plot with Ground Truth, Measurements, and Estimated Position')
-
-        # Show legend
-        handles, labels = ax1.get_legend_handles_labels()
-        ax1.legend(handles=[handles[0], handles[1]])  # Include both Ground Truth and Estimated Position
-
-        # Subplot 2: Residuals Plot
-        ax2 = fig.add_subplot(122)
-        indices = np.arange(len(residuals))
-        ax2.scatter(indices, residuals, c='b', marker='o')
-        ax2.set_xlabel('Measurement Index')
-        ax2.set_ylabel('Residual Magnitude')
-        ax2.set_title('Residuals as a Function of Measurement Index')
-
-        # Show plot
-        plt.tight_layout()
-        plt.show()
-
-        # Print the error
-        print(f'Error between estimated position and ground truth: {error:.2f} meters')
-
-    def print_high_residual_measurements(self, measurements, residuals, ranges, ground_truth, x_ls, threshold=100):
-        """
-        Print measurements with residuals above the given threshold, including their distances to the ground truth
-        and the delta between the range and ground truth distance.
-        """
-        high_residual_indices = np.where(residuals > threshold)[0]
-        
-        range_measurements = np.array(ranges)
-        measurements = np.array(measurements)
-
-        # Ensure measurements and range are 2D arrays
-        range_measurements = range_measurements.reshape(-1, 1)  # Ensure it's a column vector
-
-        # Combine measurements and range
-        combined_matrix = np.hstack((measurements, range_measurements))
-        A, b = self.uwb_online_initialisation.setup_linear_least_square(combined_matrix)
-
-        print("Result of the linear LS", x_ls)
-        print("Ground truth", ground_truth, np.linalg.norm(ground_truth)**2)
-        self.plot_colored_residuals(ground_truth, np.array(combined_matrix), residuals, x_ls[:3])
-        if len(high_residual_indices) == 0:
-            print("No measurements with residuals above the threshold.")
-        else:
-            print(f"Measurements with residuals above {threshold}:")
-            for index in high_residual_indices:
-                measurement_position = measurements[index]
-                # Calculate the Euclidean distance from the measurement position to the ground truth
-                distance_to_ground_truth = np.linalg.norm(measurement_position - ground_truth)
-                # Calculate the delta between the measured range and the distance to ground truth
-                delta = np.abs(ranges[index] - distance_to_ground_truth)
-
-                computed_residual = -(A[index] @ x_ls - b[index])
-
-                x, y, z = measurement_position
-                measured_dist = ranges[index]
-                norm_squared = x**2 + y**2 + z**2
-                a = [-2*x, -2*y, -2*z, 1]
-                B = measured_dist**2 - norm_squared
-
-
-                print(f"Measurement {index}: Position {measurement_position}, Range {ranges[index]}, Residual {residuals[index]:.2f}, True residual {computed_residual:.2f} m, Distance to Ground Truth {distance_to_ground_truth:.2f} m, Delta {delta:.2f} m")
-
-        # Exclude high residual measurements
-        filtered_indices = np.setdiff1d(np.arange(len(measurements)), high_residual_indices)
-        filtered_measurements = measurements[filtered_indices]
-        filtered_ranges = range_measurements[filtered_indices]
-
-        # Recompute least squares estimation without high residuals
-        combined_filtered_matrix = np.hstack((filtered_measurements, filtered_ranges.reshape(-1, 1)))
-        A_filtered, b_filtered = self.uwb_online_initialisation.setup_linear_least_square(combined_filtered_matrix)
-        estimator_filtered, covariance_matrix_filtered, residuals_filtered, x_filtered = self.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(combined_filtered_matrix)
-
-        # Print new results
-        print("Result of the linear LS without high residuals", estimator_filtered)
-        print("Ground truth", ground_truth, np.linalg.norm(ground_truth)**2)
-        
-        # Print residuals for the filtered results
-        self.plot_colored_residuals(ground_truth, np.array(filtered_measurements), residuals_filtered, estimator_filtered[:3])
-        print("New residual analysis:")
-        for index in range(len(filtered_measurements)):
-            measurement_position = filtered_measurements[index]
-            distance_to_ground_truth = np.linalg.norm(measurement_position - ground_truth)
-            delta = np.abs(filtered_ranges[index] - distance_to_ground_truth)
-
-            computed_residual = -(A_filtered[index] @ x_filtered - b_filtered[index])
-
-            x, y, z = measurement_position
-            measured_dist = filtered_ranges[index]
-            norm_squared = x**2 + y**2 + z**2
-            a = [-2*x, -2*y, -2*z, 1]
-            B = measured_dist**2 - norm_squared
-
-            print(f"Measurement {index}: Position {measurement_position}, Range {filtered_ranges[index]}, Residual {residuals_filtered[index]:.2f}, True residual {computed_residual:.2f} m, Distance to Ground Truth {distance_to_ground_truth:.2f} m, Delta {delta.tolist()[0]:.2f} m")
-
-
-    def use_ransac(self, measurements, num_iterations=1000, threshold=0.5):
-
-        def trilaterate(p1, p2, p3, p4, r1, r2, r3, r4):
-            """
-            Compute the position using trilateration given 4 points and their distances.
-            Points are in the form (x, y, z) and distances are the respective measurements.
-            """
-            # Unpack the points
-            x1, y1, z1 = p1
-            x2, y2, z2 = p2
-            x3, y3, z3 = p3
-            x4, y4, z4 = p4
-            
-            # Convert distances to squared values
-            r1_squared = r1 ** 2
-            r2_squared = r2 ** 2
-            r3_squared = r3 ** 2
-            r4_squared = r4 ** 2
-            
-            # Set up matrices for solving the system of equations
-            A = np.array([
-                [2 * (x2 - x1), 2 * (y2 - y1), 2 * (z2 - z1)],
-                [2 * (x3 - x1), 2 * (y3 - y1), 2 * (z3 - z1)],
-                [2 * (x4 - x1), 2 * (y4 - y1), 2 * (z4 - z1)]
-            ])
-            
-            b = np.array([
-                r1_squared - r2_squared - (x1**2 - x2**2) - (y1**2 - y2**2) - (z1**2 - z2**2),
-                r1_squared - r3_squared - (x1**2 - x3**2) - (y1**2 - y3**2) - (z1**2 - z3**2),
-                r1_squared - r4_squared - (x1**2 - x4**2) - (y1**2 - y4**2) - (z1**2 - z4**2)
-            ])
-            
-            # Solve for the position
+        def convert_str_to_list(s):
+            # Replace 'nan', 'inf', and '-inf' with their corresponding numpy constants
+            s = s.replace('nan', 'np.nan').replace('inf', 'np.inf').replace('-inf', '-np.inf')
+            # Evaluate the string as a Python expression and return the result
             try:
-                position = np.linalg.lstsq(A, b, rcond=None)[0]
-            except np.linalg.LinAlgError:
-                return None  # In case of an ill-conditioned matrix
-            
-            return position
+                return eval(s)
+            except Exception as e:
+                # If evaluation fails, return the original string
+                return s
+    
+        data = pd.read_csv(path, header=None, converters={i: convert_str_to_list for i in range(3)})
+        data.columns = ['anchor_position_gt','measured_positions', 'measured_ranges']
 
-        def calculate_residuals(position, measurements):
-            """
-            Compute residuals for each measurement given the estimated position.
-            """
-            residuals = []
-            for (x, y, z, r) in measurements:
-                dist = np.linalg.norm(np.array(position) - np.array([x, y, z]))
-                residual = abs(dist - r)
-                residuals.append(residual)
-            return residuals
+        return data
 
-        best_model = None
-        best_inliers = []
-        
-        for _ in range(num_iterations):
-            # Randomly sample 4 measurements
-            sample = random.sample(measurements, 4)
-            points, distances = zip(*[(m[:3], m[3]) for m in sample])
-            
-            # Compute the estimated position
-            estimated_position = trilaterate(*points, *distances)
-            
-            if estimated_position is None:
-                continue
-            
-            # Calculate residuals
-            residuals = calculate_residuals(estimated_position, measurements)
-            
-            # Determine inliers
-            inliers = [i for i, res in enumerate(residuals) if res < threshold]
-            
-            # Update best model if current one has more inliers
-            if len(inliers) > len(best_inliers):
-                best_inliers = inliers
-                best_model = estimated_position
-        
-        return best_model, best_inliers
+    def save_row_to_csv(self, csv_file, row):
+        with open(csv_file, 'a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(row)
 
 
 
@@ -674,90 +614,101 @@ class CalculateOnlineInitialisation:
 
 
 
-def run_simulation_metrics():
+
+
+
+
+def run_simulation_stopping_metrics_comparison():
     """Run the simulation to gather measurements and metrics for the unknown anchor, using all space and all measurement available. (no stopping criterion)
-    The metrics are stored in a CSV file, ready to be analysed.""" 
+    The metrics are stored in a CSV file, ready to be analysed.
+    
+    GOAL: choose which metric is the more reliable and gives the more information to get the best estimation of the anchor position with minimal error.""" 
 
     # Define the path of the csv to store the data
     path = csv_dir / 'metrics.csv'
 
     # iterate over environments
     for environment in range(1000):
-
         calculate_online_initialisation = CalculateOnlineInitialisation()
-
-        # Randomise the environment
         calculate_online_initialisation.randomise_environment()
 
-        # Run the simulation to gather measurements and metrics without stopping criterion
-        calculate_online_initialisation.run_simulation_outlier_filtering()
-        
-        row = [str(calculate_online_initialisation.gdop_vector), str(calculate_online_initialisation.fim_vector), str(calculate_online_initialisation.condition_number_vector), str(calculate_online_initialisation.sum_of_residuals_vector), str([np.max(row) for row in calculate_online_initialisation.covariances_vector]), str(calculate_online_initialisation.error_vector)]
+        unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+        calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+        calculate_online_initialisation.uwb_online_initialisation.trajectory = calculate_online_initialisation.drone_sim.drone_trajectory
 
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
+        calculate_online_initialisation.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted" # Method to use for the rough estimate, either simple_linear or linear_reweighted
+        
+        calculate_online_initialisation.run_pipeline_pre_optimisation()
+
+        row = [str(calculate_online_initialisation.gdop_vector), str([np.linalg.det(row) for row in calculate_online_initialisation.fim_vector]), str(calculate_online_initialisation.condition_number_vector), str(calculate_online_initialisation.residuals_vector), str([np.mean(row[:3]) for row in calculate_online_initialisation.covariances_vector]), str(calculate_online_initialisation.verifications_vector), str(calculate_online_initialisation.pos_delta_vector), str(calculate_online_initialisation.error_vector), str(calculate_online_initialisation.constant_bias_error_vector), str(calculate_online_initialisation.linear_bias_error_vector)]
+
+        calculate_online_initialisation.save_row_to_csv(path, row)
 
 def run_simulation_linear_least_squares_comparison():
     """Run the simulation to gather measurements and compute a linear least squares estimation for the unknown anchor, using different bias settings.
     A stopping criterion is used to extract a subset of the measurements, and the results are stored in a CSV file."""
-    
-    # Define the path of the csv to store the data
-    path = csv_dir / 'linear_least_squares.csv'
 
+
+
+    settings1 = ["linear_no_bias", "linear_constant_bias", "linear_linear_bias", "linear_both_biases"]
+    settings2 = ["reweighted_linear_no_bias", "reweighted_linear_constant_bias", "reweighted_linear_linear_bias", "reweighted_linear_both_biases"]
+    settings3 = ["filtered_linear_no_bias", "filtered_linear_constant_bias", "filtered_linear_linear_bias", "filtered_linear_both_biases"]
+    settings4 = ["filtered_reweighted_linear_no_bias", "filtered_reweighted_linear_constant_bias", "filtered_reweighted_linear_linear_bias", "filtered_reweighted_linear_both_biases"]
+    settings = settings1 + settings2 + settings3 + settings4
+    
     # Iterate over environments
     for environment in range(100000):
 
         calculate_online_initialisation = CalculateOnlineInitialisation()
-
-        # Randomise the environment
         calculate_online_initialisation.randomise_environment()
 
-        # Run the simulation to gather measurements and metrics without stopping criterion
-        calculate_online_initialisation.run_simulation_outlier_filtering()
+        unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+        calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
 
-        # Use the stopping criterion to extract a subset of the measurements
-        try:
-            measurement_vector = calculate_online_initialisation.use_stopping_criterion()
-        except:
-            continue
+        trajectory_copy = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+        calculate_online_initialisation.uwb_online_initialisation.trajectory = trajectory_copy
+        
+        
 
-        if len(measurement_vector) < 5:
+        # Calculate the measurement vector to use for the simulation (Needed to compare methods on the same data)
+        # measurement_vector = None
+        measurement_vector = calculate_online_initialisation.gather_measurements(unknown_anchor.anchor_ID)
+
+        
+
+        errors = []
+        need_to_exit = False
+        measurement_number = []
+        # If needed to compare, start the loop here 
+        for setting in settings:
+            
+            # Set parameters for the simulation here
+            calculate_online_initialisation.write_settings(setting)
+
+            # Run the simulation
+            try:
+                calculate_online_initialisation.run_pipeline_pre_optimisation(measurement_vector)
+            except:
+                need_to_exit = True
+                break
+            # Save the error values / other metrics before the next iteration with different parameters
+            error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(unknown_anchor.get_anchor_coordinates(), calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"][:3])
+            error_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(unknown_anchor.get_anchor_gt_estimator(), calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"])
+            constant_bias_error = np.linalg.norm(unknown_anchor.bias - calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"][3])
+            linear_bias_error = np.linalg.norm(unknown_anchor.linear_bias - calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"][4])
+            non_linear_error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(unknown_anchor.get_anchor_coordinates(), calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"][:3])
+            errors.extend([error, error_full, constant_bias_error, linear_bias_error, non_linear_error])
+
+            measurement_number.append(len(calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]))
+
+            calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+
+        if need_to_exit:
             continue
         
-        # Run the linear least squares estimation with and without biases and store them in arrays
-        estimators = []
-        covariances = []
-        residualss = []
-
-        for use_linear_bias in [True, False]:
-            for use_constant_bias in [True, False]:
-                calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = use_linear_bias
-                calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = use_constant_bias
-
-                estimator, covariance, residuals, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector)
-                
-                estimators.append(estimator)
-                covariances.append(covariance)
-                residualss.append(residuals)
-
-        # position, inlier_indices = calculate_online_initialisation.use_ransac(measurement_vector, num_iterations=1000, threshold=0.5)
-
-        # Calculate the error values
-        error_t_t = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[0][:3])
-        error_t_t_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[0])
-        error_t_f = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1][:3])
-        error_t_f_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1])
-        error_f_t = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[2][:3])
-        error_f_t_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[2])
-        error_f_f = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[3][:3])
-        error_f_f_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[3])
-
-        # error_position_ransac = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), position)
-
+        
         # Calculate metrics to store in the CSV
-        number_of_measurements = len(measurement_vector)
+        number_of_measurements = measurement_number 
         min_angle_between_two_consecutive_measurements = np.rad2deg(np.atan(calculate_online_initialisation.uwb_online_initialisation.params['distance_to_anchor_ratio_threshold']))
 
         anchor_position_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates()
@@ -776,22 +727,18 @@ def run_simulation_linear_least_squares_comparison():
         constant_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].bias
         linear_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias
 
-        linear_bias_error_true_true = np.linalg.norm(estimators[0][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_bias_error_true_false = np.linalg.norm(estimators[1][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-
-        constant_bias_error_true_true = np.linalg.norm(estimators[0][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-        constant_bias_error_false_true = np.linalg.norm(estimators[2][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-        noise_variance = calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance
+        noise_variance_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance
         outlier_probability = calculate_online_initialisation.drone_sim.unknown_anchors[0].outlier_probability
 
-        row = [number_of_measurements, min_angle_between_two_consecutive_measurements, min_distance_to_anchor, max_distance_to_anchor, mean_distance_to_anchor, std_distance_to_anchor, angular_span_elevation, angular_span_azimuth, constant_bias_gt, linear_bias_gt, measured_noise_mean, noise_variance, measured_noise_var, outlier_probability, error_t_t, error_t_t_full, constant_bias_error_true_true, linear_bias_error_true_true, error_t_f, error_t_f_full, linear_bias_error_true_false, error_f_t, error_f_t_full, constant_bias_error_false_true, error_f_f, error_f_f_full]
 
+        # Prepare the rows to write to the CSV file
+        environment_settings = [number_of_measurements, min_angle_between_two_consecutive_measurements, min_distance_to_anchor, max_distance_to_anchor, mean_distance_to_anchor, std_distance_to_anchor, angular_span_elevation, angular_span_azimuth, constant_bias_gt, linear_bias_gt, noise_variance_gt, measured_noise_var, measured_noise_mean, outlier_probability]
+        
+        row = environment_settings + errors
+        
+        csv_file = csv_dir / 'linear_least_squares.csv'
+        calculate_online_initialisation.save_row_to_csv(csv_file, row)
 
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
 
 def run_simulation_non_linear_least_squares_comparison():
     """Run the simulation to gather measurements and compute a non-linear least squares estimation for the unknown anchor, using different optimisation methods.
@@ -808,12 +755,19 @@ def run_simulation_non_linear_least_squares_comparison():
         # Randomise the environment
         calculate_online_initialisation.randomise_environment()
 
-        # Run the simulation to gather measurements and metrics without stopping criterion
-        calculate_online_initialisation.run_simulation()
+        unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+        calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+        calculate_online_initialisation.uwb_online_initialisation.trajectory = calculate_online_initialisation.drone_sim.drone_trajectory
+        
+        calculate_online_initialisation.run_pipeline_pre_optimisation()
 
         # Use the stopping criterion to extract a subset of the measurements
         try:
-            measurement_vector = calculate_online_initialisation.use_stopping_criterion()
+            positions = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]
+            distances = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["distances_pre_rough_estimate"]
+            measurement_vector = []
+            for position, distance in zip(positions, distances):
+                measurement_vector.append([position[0], position[1], position[2], distance])
         except:
             continue
         
@@ -826,7 +780,7 @@ def run_simulation_non_linear_least_squares_comparison():
         estimator_linear, covariance_linear, residuals_linear, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector)
 
         # Run the non-linear least squares estimation with different optimisation methods
-        non_linear_methods = ['LM', 'IRLS', 'KRR']
+        non_linear_methods = ['IRLS', 'MM', 'EM']
         estimators = []
         covariances = []
         residualss = []
@@ -849,10 +803,10 @@ def run_simulation_non_linear_least_squares_comparison():
         error_lm = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[0][:3])
         error_lm_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[0])
 
-        error_irls = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1][:3])
+        error_irls = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[1][:3])
         error_irls_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1])
 
-        error_krr = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[2][:3])
+        error_krr = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[2][:3])
         error_krr_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[2])
 
         # Calculate metrics to store in the CSV
@@ -891,285 +845,488 @@ def run_simulation_non_linear_least_squares_comparison():
         row = [number_of_measurements, min_angle_between_two_consecutive_measurements, min_distance_to_anchor, max_distance_to_anchor, mean_distance_to_anchor, std_distance_to_anchor, angular_span_elevation, angular_span_azimuth, constant_bias_gt, linear_bias_gt, measured_noise_mean, noise_variance, measured_noise_var, outlier_probability, linear_error, linear_error_full, linear_linear_bias_error, linear_constant_bias_error, error_lm, error_lm_full, constant_bias_error_lm, linear_bias_error_lm, error_irls, error_irls_full, constant_bias_error_irls ,linear_bias_error_irls, error_krr, error_krr_full, constant_bias_error_krr, linear_bias_error_krr]
 
 
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
+        calculate_online_initialisation.save_row_to_csv(path, row)
 
-def run_simulation_outlier_filtering_comparison():
-    """Run the simulation to gather measurements and compute a non-linear least squares estimation for the unknown anchor, using different outlier filtering methods.
-    A stopping criterion is used to extract a subset of the measurements, and the results are stored in a CSV file."""
+def run_simulation_visualisation():
 
-    # Define the path of the csv to store the data
-    path = csv_dir / 'outlier_filtering.csv'
-
-    # Iterate over environments
-    for environment in range(100000):
-
-        calculate_online_initialisation = CalculateOnlineInitialisation()
-
-        # Randomise the environment
-        calculate_online_initialisation.randomise_environment()
-
-        # Run the simulation to gather measurements and metrics without stopping criterion
-        calculate_online_initialisation.run_simulation()
-
-        try:
-            measurement_vector = calculate_online_initialisation.use_stopping_criterion(metric=None)
-        except:
-            continue
-
-        if len(measurement_vector) < 5:
-            continue
-
-        # Run the simulation to gather measurements and metrics without stopping criterion but with outlier filtering
-        calculate_online_initialisation.run_simulation_outlier_filtering()
-        try:
-            measurement_vector_outlier_filtering = calculate_online_initialisation.use_stopping_criterion()
-        except:
-            continue
-
-        if len(measurement_vector_outlier_filtering) < 5:
-            continue
-        
-        # Run the linear least squares estimation with and without outlier filtering
-        estimators = []
-        covariances = []
-        residualss = []
-
-        calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = False
-        calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = False
-        estimator_linear, covariance_linear, residuals_linear, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector)
-        estimator_linear_outlier_filtering, covariance_linear_outlier_filtering, residuals_linear_outlier_filtering, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector_outlier_filtering)
-        
-        calculate_online_initialisation.uwb_online_initialisation.params['non_linear_optimisation_type'] = 'IRLS'
-        estimator, covariance = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(measurement_vector, estimator_linear)
-        estimator_outlier_filtering, covariance_outlier_filtering = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(measurement_vector_outlier_filtering, estimator_linear_outlier_filtering)
-
-        estimators.append(estimator)
-        covariances.append(covariance)
-        estimators.append(estimator_outlier_filtering)
-        covariances.append(covariance_outlier_filtering)
-
-
-        # Calculate the error values
-        linear_error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimator_linear[:3])
-        linear_error_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimator_linear)
-        linear_linear_bias_error = np.linalg.norm(estimator_linear[4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_constant_bias_error = np.linalg.norm(estimator_linear[3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-        linear_error_outlier_filtering = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimator_linear_outlier_filtering[:3])
-        linear_error_full_outlier_filtering = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimator_linear_outlier_filtering)
-        linear_linear_bias_error_outlier_filtering = np.linalg.norm(estimator_linear_outlier_filtering[4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_constant_bias_error_outlier_filtering = np.linalg.norm(estimator_linear_outlier_filtering[3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-
-        error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[0][:3])
-        error_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[0])
-        error_outlier_filtering = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1][:3])
-        error_full_outlier_filtering = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1])
-
-
-        # Calculate metrics to store in the CSV
-        number_of_measurements = len(measurement_vector)
-        number_of_measurements_outlier_filtering = len(measurement_vector_outlier_filtering)
-        
-        min_angle_between_two_consecutive_measurements = np.rad2deg(np.atan(calculate_online_initialisation.uwb_online_initialisation.params['distance_to_anchor_ratio_threshold']))
-
-        anchor_position_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates()
-        anchor_distances_gt = np.linalg.norm([np.array(row[:3]) - np.array(anchor_position_gt) for row in measurement_vector] , axis=1)
-
-        measured_noise_mean = np.mean(np.abs(anchor_distances_gt - np.array(measurement_vector)[:, 3]))
-        measured_noise_var = np.var(np.abs(anchor_distances_gt - np.array(measurement_vector)[:, 3]))
-
-        min_distance_to_anchor = np.min(anchor_distances_gt)
-        max_distance_to_anchor = np.max(anchor_distances_gt)
-        mean_distance_to_anchor = np.mean(anchor_distances_gt)
-        std_distance_to_anchor = np.std(anchor_distances_gt)
-
-        angular_span_azimuth, angular_span_elevation = calculate_online_initialisation.compute_angular_span_around_point([row[:3] for row in measurement_vector], anchor_position_gt)
-
-        constant_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].bias
-        linear_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias
-
-        linear_bias_error = np.linalg.norm(estimators[0][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_bias_error_outlier_filtering = np.linalg.norm(estimators[1][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        
-        
-        constant_bias_error = np.linalg.norm(estimators[0][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-        constant_bias_error_outlier_filtering = np.linalg.norm(estimators[1][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-        noise_variance = calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance
-        outlier_probability = calculate_online_initialisation.drone_sim.unknown_anchors[0].outlier_probability
-
-        row = [number_of_measurements, number_of_measurements_outlier_filtering, min_angle_between_two_consecutive_measurements, min_distance_to_anchor, max_distance_to_anchor, mean_distance_to_anchor, std_distance_to_anchor, angular_span_elevation, angular_span_azimuth, constant_bias_gt, linear_bias_gt, measured_noise_mean, noise_variance, measured_noise_var, outlier_probability, linear_error, linear_error_full, linear_linear_bias_error, linear_constant_bias_error, linear_error_outlier_filtering, linear_error_full_outlier_filtering, linear_linear_bias_error_outlier_filtering, linear_constant_bias_error_outlier_filtering, error, error_full, constant_bias_error, linear_bias_error, error_outlier_filtering, error_full_outlier_filtering, constant_bias_error_outlier_filtering ,linear_bias_error_outlier_filtering]
-
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
-
-
-
-                
-            
-
-
-
-def run_simulation_trajectory_optimisation_comparison():
-    pass
-
-def run_simulation_residual_analysis():
     calculate_online_initialisation = CalculateOnlineInitialisation()
-    calculate_online_initialisation.run_residual_analysis()
+    calculate_online_initialisation.randomise_environment()
 
-def run_simulation_error_debugging():
-    path = csv_dir / 'error_debugging.csv'
+    unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+    calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+    trajectory_copy = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+    trajectory_copy2 = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+    calculate_online_initialisation.uwb_online_initialisation.trajectory = trajectory_copy
 
-    for environment in range(100000):
-        calculate_online_initialisation = CalculateOnlineInitialisation()
+    setting = "linear_reweighted"
+    calculate_online_initialisation.write_settings(setting)
+    # calculate_online_initialisation.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted" # Method to use for the rough estimate, either simple_linear or linear_reweighted
+    # calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = True
+    # calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = True
+    # calculate_online_initialisation.uwb_online_initialisation.params['zscore_threshold'] = 3
+    calculate_online_initialisation.uwb_online_initialisation.params['regularise'] = True
 
-        calculate_online_initialisation.randomise_environment()
+    # calculate_online_initialisation.run_pipeline_pre_optimisation()
+    calculate_online_initialisation.run_pipeline_full()
 
-        calculate_online_initialisation.run_simulation()
-        # measurement_vector = calculate_online_initialisation.use_stopping_criterion()
-        try:
-            measurement_vector = calculate_online_initialisation.use_stopping_criterion()
-        except:
-            continue
+    weight_vectors = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["linear_ls_weights"]
+    positions = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]
+    distances = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["distances_pre_rough_estimate"]
+    positions_optimal = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_post_rough_estimate"]
+    residual_vectors = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["residual_vector"]
 
-        if len(measurement_vector) < 5:
-            continue
+
+    measurement_vector = []
+    for position, distance in zip(positions, distances):
+        measurement_vector.append([position[0], position[1], position[2], distance])
+
+    
+    anchor_position = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates()
+    anchor_estimator_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator()
+    drone_trajectory = calculate_online_initialisation.drone_sim.drone_trajectory
+    optimal_trajectory = calculate_online_initialisation.uwb_online_initialisation.spline_x, calculate_online_initialisation.uwb_online_initialisation.spline_y, calculate_online_initialisation.uwb_online_initialisation.spline_z
+    estimated_anchor_position_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"][:3]
+    estimated_anchor_position_non_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"][:3]
+    
+
+    full_estimator_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"]
+    full_estimator_non_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"]
+    full_estimator_final = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator"]
+    anchor_estimator_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator()
+
+    print(f"Verification vector: {calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]['verification_vector']}")
+    print("\n")
+    print(f"Outlier probability: {calculate_online_initialisation.drone_sim.unknown_anchors[0].outlier_probability}")
+    print(f"Noise variance: {calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance}")
+
+
+    error_linear = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, estimated_anchor_position_linear)
+    print(f"Error_linear: {error_linear:.2f} m")
+    error_non_linear = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, estimated_anchor_position_non_linear)
+    print(f"Error_non_linear: {error_non_linear:.2f} m")
+    error_final = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, full_estimator_final[:3])
+    print(f"Error_final: {error_final:.2f} m")
+
+    print("Estimator linear", estimated_anchor_position_linear)
+    print("Ground truth", anchor_position)
+
+    print("Full estimator linear", full_estimator_linear)
+    print("Full estimator non-linear", full_estimator_non_linear)
+    print("Full Ground truth", calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator())
+
+    A,b = calculate_online_initialisation.uwb_online_initialisation.setup_linear_least_square(measurement_vector)
+    norm_anchor_squared = np.linalg.norm(anchor_position)**2
+    x = [anchor_estimator_gt[0], anchor_estimator_gt[1], anchor_estimator_gt[2], 1/anchor_estimator_gt[4]**2, anchor_estimator_gt[3]/anchor_estimator_gt[4]**2, anchor_estimator_gt[3]**2/anchor_estimator_gt[4]**2 - np.linalg.norm(anchor_estimator_gt[:3])**2]
+    # x = [anchor_estimator_gt[0]/norm_anchor_squared, anchor_estimator_gt[1]/norm_anchor_squared, anchor_estimator_gt[2]/norm_anchor_squared, 1/anchor_estimator_gt[4]**2/norm_anchor_squared, anchor_estimator_gt[3]/anchor_estimator_gt[4]**2/norm_anchor_squared, 1/norm_anchor_squared]
+    ground_truth_residuals =  b - A @ x
+
+    plt.figure(figsize=(10, 10))
+
+    # Create a grid with 2 columns, with the right column split into three rows
+    gs = gridspec.GridSpec(3, 2, width_ratios=[1, 2], height_ratios=[1, 1, 1])
+
+    # First subplot (1/3 of the width)
+    ax1 = plt.subplot(gs[:, 0], projection='3d')
+    ax1.scatter3D([row[0] for row in positions], [row[1] for row in positions], [row[2] for row in positions])
+    if len(positions_optimal) > 0:
+        ax1.scatter3D([row[0] for row in positions_optimal], [row[1] for row in positions_optimal], [row[2] for row in positions_optimal], c='r')
+    ax1.scatter3D(anchor_position[0], anchor_position[1], anchor_position[2], c='r', label='Anchor position')
+    ax1.scatter3D(estimated_anchor_position_linear[0], estimated_anchor_position_linear[1], estimated_anchor_position_linear[2], c='k', label='Estimated anchor position Linear')
+    ax1.scatter3D(estimated_anchor_position_non_linear[0], estimated_anchor_position_non_linear[1], estimated_anchor_position_non_linear[2], c='b', label='Estimated anchor position Non-Linear')
+    ax1.plot3D(trajectory_copy2.spline_x, trajectory_copy2.spline_y, trajectory_copy2.spline_z, c='b', label='Drone trajectory')
+    if optimal_trajectory[0] is not None:
+        ax1.plot3D(optimal_trajectory[0], optimal_trajectory[1], optimal_trajectory[2], c='g', label='Optimal trajectory')
+    ax1.scatter3D(positions[0][0], positions[0][1], positions[0][2], marker='x', c='g', label='Starting position', s=100)
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    ax1.set_zlabel('Z')
+    ax1.legend()
+
+    # Second subplot (Top right, 2/3 of the width, upper part)
+    ax2 = plt.subplot(gs[0, 1])
+    ax2.set_ylabel('Weights')
+    colors = plt.cm.jet(np.linspace(0, 1, len(weight_vectors)))
+    for i, weight_vector in enumerate(weight_vectors):
+        ax2.plot(weight_vector, color=colors[i])
+
+    # Create a twin Axes sharing the x-axis
+    ax3 = ax2.twinx()
+    ax3.set_ylabel('Residuals')
+    ax3.scatter(range(len(ground_truth_residuals)), ground_truth_residuals, label='Ground truth residuals', c='b')
+    ax3.legend()
+
+    # Center the y-axis around zero for ax2 and ax3
+    y_lim_2 = max(abs(ax2.get_ylim()[0]), abs(ax2.get_ylim()[1]))
+    y_lim_3 = max(abs(ax3.get_ylim()[0]), abs(ax3.get_ylim()[1]))
+
+    ax2.set_ylim(-y_lim_2, y_lim_2)
+    ax3.set_ylim(-y_lim_3, y_lim_3)
+
+    # Plot vertical lines where residual is bigger than z-score threshold of 2
+    zscore_thresh = 2
+    zscores = calculate_online_initialisation.uwb_online_initialisation.compute_z_score(ground_truth_residuals)
+    outliers = np.where(np.abs(zscores) > zscore_thresh)[0]
+    for outlier in outliers:
+        ax2.axvline(x=outlier, color='r', linestyle='--')
+
+
+    # Third subplot (Bottom right, 2/3 of the width, lower part)
+    ax4 = plt.subplot(gs[1, 1])
+    ax4.set_ylabel('Residuals')
+    colors = plt.cm.jet(np.linspace(0, 1, len(residual_vectors)))
+    for i, residual_vector in enumerate(residual_vectors):
+        ax4.plot(range(len(residual_vector)),residual_vector, color=colors[i])
+    for outlier in outliers:
+        ax4.axvline(x=outlier, color='r', linestyle='--')
+
+    ax5 = ax4.twinx()
+    ax5.set_ylabel('Error')
+    ax5.set_yscale('log')
+    # Create a scatter plot with a gradient color map
+    x_values = np.arange(len(calculate_online_initialisation.error_vector))
+    y_values = calculate_online_initialisation.error_vector
+    scatter = ax5.scatter(x_values, y_values, c=x_values, cmap='jet', s=50)
+
+    ax6 = plt.subplot(gs[2, 1])
+    ax6.set_ylabel('Error')
+    #ax6.plot(calculate_online_initialisation.error_vector, label='Error')
+    ax6.plot(calculate_online_initialisation.constant_bias_error_vector, label='Constant bias error')
+    ax6.plot(calculate_online_initialisation.linear_bias_error_vector, label='Linear bias error')
+    ax6.plot(calculate_online_initialisation.constant_bias_vector, label='Constant bias')
+    ax6.plot(calculate_online_initialisation.linear_bias_vector, label='Linear bias')
+
+    ax6.legend()
+    ax7 = ax6.twinx()
+    ax7.plot(calculate_online_initialisation.error_vector, label='Error GT', c='r')
+    ax7.set_yscale('log')
+    ax7.legend()
+
+
+    plt.tight_layout()
+    plt.show()
+
+
+def run_simulation_visualisation_trajectory_optimisation():
+
+    calculate_online_initialisation = CalculateOnlineInitialisation()
+    calculate_online_initialisation.randomise_environment()
+
+    unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+    calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+    trajectory_copy = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+    trajectory_copy2 = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+    calculate_online_initialisation.uwb_online_initialisation.trajectory = trajectory_copy
+
+    setting = "reweighted_linear_both_biases"
+    # calculate_online_initialisation.write_settings(setting)
+    # calculate_online_initialisation.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted" # Method to use for the rough estimate, either simple_linear or linear_reweighted
+    # calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = True
+    # calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = True
+    # calculate_online_initialisation.uwb_online_initialisation.params['zscore_threshold'] = 3
+    # calculate_online_initialisation.uwb_online_initialisation.params['regularise'] = True
+    calculate_online_initialisation.uwb_online_initialisation.params["trajectory_optimisation_method"] = "GDOP"
+
+    # calculate_online_initialisation.run_pipeline_pre_optimisation()
+    calculate_online_initialisation.run_pipeline_pre_optimisation()
+
+    weight_vectors = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["linear_ls_weights"]
+    positions = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]
+    distances = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["distances_pre_rough_estimate"]
+    residual_vectors = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["residual_vector"]
+
+    anchor_estimate_variance = np.diag(calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["covariance_matrix_rough_linear"])[:3]
+    print(anchor_estimate_variance)
+    if calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["status"] != "optimised_trajectory":
+
+
+        anchor_estimator = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"]
+        anchor_estimate = anchor_estimator[:3]
+        previous_measurement_positions = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]
+
+        # To be adjusted if needed
+        initial_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory
+        remaining_trajectory = initial_trajectory
         
-        num_measurements = len(measurement_vector)
-
-        position, inlier_indices = calculate_online_initialisation.use_ransac(measurement_vector, num_iterations=1000, threshold=0.2)
-
-        if position is None:
-            continue
-
-        calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = False
-        calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = False
-
-        estimator, covariance, residuals, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector)
+        calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.method = calculate_online_initialisation.uwb_online_initialisation.params["trajectory_optimisation_method"]
+        # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
+        optimal_waypoints = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.optimize_waypoints_incrementally_spherical(anchor_estimator, anchor_estimate_variance, previous_measurement_positions, remaining_trajectory, radius_of_search = 1, max_waypoints=8, marginal_gain_threshold=0.01)
         
-        error_position_ransac = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), position)
-        error_position_ls = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimator[:3])
-
-        anchor_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator()
-
-        row = [num_measurements, anchor_gt[0], anchor_gt[1], anchor_gt[2], position[0], position[1], position[2], error_position_ransac, estimator[0], estimator[1], estimator[2], error_position_ls]
+        # Create a spline trajectory from the optimal waypoints, to collect the measurements but also go back to the initial mission
+        optimal_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
+        full_end_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.create_full_optimised_trajectory(previous_measurement_positions[-1], optimal_waypoints, initial_trajectory)
         
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
+        calculate_online_initialisation.uwb_online_initialisation.spline_x_optimal, calculate_online_initialisation.uwb_online_initialisation.spline_y_optimal, calculate_online_initialisation.uwb_online_initialisation.spline_z_optimal = optimal_trajectory.spline_x, optimal_trajectory.spline_y, optimal_trajectory.spline_z
+        calculate_online_initialisation.uwb_online_initialisation.spline_x, calculate_online_initialisation.uwb_online_initialisation.spline_y, calculate_online_initialisation.uwb_online_initialisation.spline_z = full_end_trajectory.spline_x, full_end_trajectory.spline_y, full_end_trajectory.spline_z
+        
 
-def run_simulation_clustering_comparison():
+    calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["status"] = "optimised_trajectory"
+    calculate_online_initialisation.run_pipeline_post_optimisation()
 
-    path = csv_dir / 'clustering.csv'
 
-    for environment in range(100000):
-        calculate_online_initialisation = CalculateOnlineInitialisation()
+    # Save the GDOP version
 
-        calculate_online_initialisation.randomise_environment()
+    positions_optimal_GDOP = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_post_rough_estimate"]
+    full_estimator_final_GDOP = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator"]
 
-        calculate_online_initialisation.run_simulation()
-        try:
-            measurement_vector = calculate_online_initialisation.use_stopping_criterion()
-        except:
-            continue
+    # CLEANUP
+    calculate_online_initialisation.uwb_online_initialisation.reset_measurements_post_rough_initialisation(unknown_anchor.anchor_ID)
 
-        if len(measurement_vector) < 5:
-            continue
+    
+    calculate_online_initialisation.uwb_online_initialisation.params["trajectory_optimisation_method"] = "FIM"
+    anchor_estimator = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"]
+    anchor_estimate = anchor_estimator[:3]
+    previous_measurement_positions = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_pre_rough_estimate"]
 
-        estimators = []
-        covariances = []
-        residualss = []
+    # To be adjusted if needed
+    initial_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory
+    remaining_trajectory = initial_trajectory
+    
+    calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.method = calculate_online_initialisation.uwb_online_initialisation.params["trajectory_optimisation_method"]
+    # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
+    optimal_waypoints = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.optimize_waypoints_incrementally_spherical(anchor_estimator, anchor_estimate_variance, previous_measurement_positions, remaining_trajectory, radius_of_search = 1, max_waypoints=8, marginal_gain_threshold=0.01)
+    
+    # Create a spline trajectory from the optimal waypoints, to collect the measurements but also go back to the initial mission
+    optimal_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
+    full_end_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.create_full_optimised_trajectory(previous_measurement_positions[-1], optimal_waypoints, initial_trajectory)
+    
+    calculate_online_initialisation.uwb_online_initialisation.spline_x_optimal, calculate_online_initialisation.uwb_online_initialisation.spline_y_optimal, calculate_online_initialisation.uwb_online_initialisation.spline_z_optimal = optimal_trajectory.spline_x, optimal_trajectory.spline_y, optimal_trajectory.spline_z
+    calculate_online_initialisation.uwb_online_initialisation.spline_x, calculate_online_initialisation.uwb_online_initialisation.spline_y, calculate_online_initialisation.uwb_online_initialisation.spline_z = full_end_trajectory.spline_x, full_end_trajectory.spline_y, full_end_trajectory.spline_z
 
-        calculate_online_initialisation.uwb_online_initialisation.params['use_linear_bias'] = False
-        calculate_online_initialisation.uwb_online_initialisation.params['use_constant_bias'] = False
-        estimator_linear, covariance_linear, residuals_linear, _ = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_linear_least_squares(measurement_vector)
+    calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["status"] == "optimised_trajectory"
+
+    calculate_online_initialisation.run_pipeline_post_optimisation()
+
+    positions_optimal_FIM = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["positions_post_rough_estimate"]
+    full_estimator_final_FIM = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator"]
+
+
+    # Save the FIM version
+
+
+    measurement_vector = []
+    for position, distance in zip(positions, distances):
+        measurement_vector.append([position[0], position[1], position[2], distance])
+
+    
+    anchor_position = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates()
+    anchor_estimator_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator()
+    drone_trajectory = calculate_online_initialisation.drone_sim.drone_trajectory
+    optimal_trajectory = calculate_online_initialisation.uwb_online_initialisation.spline_x, calculate_online_initialisation.uwb_online_initialisation.spline_y, calculate_online_initialisation.uwb_online_initialisation.spline_z
+    estimated_anchor_position_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"][:3]
+    estimated_anchor_position_non_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"][:3]
+    
+
+    full_estimator_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_linear"]
+    full_estimator_non_linear = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator_rough_non_linear"]
+    full_estimator_final = calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]["estimator"]
+    anchor_estimator_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator()
+
+    print(f"Verification vector: {calculate_online_initialisation.uwb_online_initialisation.anchor_measurements_dictionary[unknown_anchor.anchor_ID]['verification_vector']}")
+    print("\n")
+    print(f"Outlier probability: {calculate_online_initialisation.drone_sim.unknown_anchors[0].outlier_probability}")
+    print(f"Noise variance: {calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance}")
+
+
+    error_linear = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, estimated_anchor_position_linear)
+    print(f"Error_linear: {error_linear:.2f} m")
+    error_non_linear = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, estimated_anchor_position_non_linear)
+    print(f"Error_non_linear: {error_non_linear:.2f} m")
+    error_final = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, full_estimator_final[:3])
+    error_final_GDOP = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, full_estimator_final_GDOP[:3])
+    error_final_FIM = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(anchor_position, full_estimator_final_FIM[:3])
+    print(f"Error_final_FIM: {error_final_FIM:.2f} m")
+    print(f"Error_final_GDOP: {error_final_GDOP:.2f} m")
+
+    print("Estimator linear", estimated_anchor_position_linear)
+    print("Ground truth", anchor_position)
+
+    print("Full estimator linear", full_estimator_linear)
+    print("Full estimator non-linear", full_estimator_non_linear)
+    print("Full Ground truth", calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator())
+
+    A,b = calculate_online_initialisation.uwb_online_initialisation.setup_linear_least_square(measurement_vector)
+    norm_anchor_squared = np.linalg.norm(anchor_position)**2
+    x = [anchor_estimator_gt[0], anchor_estimator_gt[1], anchor_estimator_gt[2], 1/anchor_estimator_gt[4]**2, anchor_estimator_gt[3]/anchor_estimator_gt[4]**2, anchor_estimator_gt[3]**2/anchor_estimator_gt[4]**2 - np.linalg.norm(anchor_estimator_gt[:3])**2]
+    # x = [anchor_estimator_gt[0]/norm_anchor_squared, anchor_estimator_gt[1]/norm_anchor_squared, anchor_estimator_gt[2]/norm_anchor_squared, 1/anchor_estimator_gt[4]**2/norm_anchor_squared, anchor_estimator_gt[3]/anchor_estimator_gt[4]**2/norm_anchor_squared, 1/norm_anchor_squared]
+    # x = [anchor_estimator_gt[0], anchor_estimator_gt[1], anchor_estimator_gt[2], np.linalg.norm(anchor_estimator_gt[:3])**2]
+    ground_truth_residuals =  b - A @ x
+
+    plt.figure(figsize=(10, 10))
+
+    # Create a grid with 2 columns, with the right column split into three rows
+    gs = gridspec.GridSpec(3, 2, width_ratios=[1, 2], height_ratios=[1, 1, 1])
+
+    # First subplot (1/3 of the width)
+    ax1 = plt.subplot(gs[:, 0], projection='3d')
+    ax1.scatter3D([row[0] for row in positions], [row[1] for row in positions], [row[2] for row in positions])
+
+    if len(positions_optimal_GDOP) > 0:
+        ax1.scatter3D([row[0] for row in positions_optimal_GDOP], [row[1] for row in positions_optimal_GDOP], [row[2] for row in positions_optimal_GDOP], marker='x', c='r')
+    if len(positions_optimal_FIM) > 0:
+        ax1.scatter3D([row[0] for row in positions_optimal_FIM], [row[1] for row in positions_optimal_FIM], [row[2] for row in positions_optimal_FIM], c='g')
+
+    ax1.scatter3D(anchor_position[0], anchor_position[1], anchor_position[2], c='r', label='Anchor position')
+    ax1.scatter3D(estimated_anchor_position_linear[0], estimated_anchor_position_linear[1], estimated_anchor_position_linear[2], c='k', label='Estimated anchor position Linear')
+    ax1.scatter3D(estimated_anchor_position_non_linear[0], estimated_anchor_position_non_linear[1], estimated_anchor_position_non_linear[2], c='b', label='Estimated anchor position Non-Linear')
+    ax1.plot3D(trajectory_copy2.spline_x, trajectory_copy2.spline_y, trajectory_copy2.spline_z, c='b', label='Drone trajectory')
+    if optimal_trajectory[0] is not None:
+        ax1.plot3D(optimal_trajectory[0], optimal_trajectory[1], optimal_trajectory[2], c='g', label='Optimal trajectory')
+    ax1.scatter3D(positions[0][0], positions[0][1], positions[0][2], marker='x', c='g', label='Starting position', s=100)
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    ax1.set_zlabel('Z')
+    ax1.legend()
+
+    # Second subplot (Top right, 2/3 of the width, upper part)
+    ax2 = plt.subplot(gs[0, 1])
+    ax2.set_ylabel('Weights')
+    colors = plt.cm.jet(np.linspace(0, 1, len(weight_vectors)))
+    for i, weight_vector in enumerate(weight_vectors):
+        ax2.plot(weight_vector, color=colors[i])
+
+    # Create a twin Axes sharing the x-axis
+    ax3 = ax2.twinx()
+    ax3.set_ylabel('Residuals')
+    ax3.scatter(range(len(ground_truth_residuals)), ground_truth_residuals, label='Ground truth residuals', c='b')
+    ax3.legend()
+
+    # Center the y-axis around zero for ax2 and ax3
+    y_lim_2 = max(abs(ax2.get_ylim()[0]), abs(ax2.get_ylim()[1]))
+    y_lim_3 = max(abs(ax3.get_ylim()[0]), abs(ax3.get_ylim()[1]))
+
+    ax2.set_ylim(-y_lim_2, y_lim_2)
+    ax3.set_ylim(-y_lim_3, y_lim_3)
+
+    # Plot vertical lines where residual is bigger than z-score threshold of 2
+    zscore_thresh = 2
+    zscores = calculate_online_initialisation.uwb_online_initialisation.compute_z_score(ground_truth_residuals)
+    outliers = np.where(np.abs(zscores) > zscore_thresh)[0]
+    for outlier in outliers:
+        ax2.axvline(x=outlier, color='r', linestyle='--')
+
+
+    # Third subplot (Bottom right, 2/3 of the width, lower part)
+    ax4 = plt.subplot(gs[1, 1])
+    ax4.set_ylabel('Residuals')
+    colors = plt.cm.jet(np.linspace(0, 1, len(residual_vectors)))
+    for i, residual_vector in enumerate(residual_vectors):
+        ax4.plot(range(len(residual_vector)),residual_vector, color=colors[i])
+    for outlier in outliers:
+        ax4.axvline(x=outlier, color='r', linestyle='--')
+
+    ax5 = ax4.twinx()
+    ax5.set_ylabel('Error')
+    ax5.set_yscale('log')
+    # Create a scatter plot with a gradient color map
+    x_values = np.arange(len(calculate_online_initialisation.error_vector))
+    y_values = calculate_online_initialisation.error_vector
+    scatter = ax5.scatter(x_values, y_values, c=x_values, cmap='jet', s=50)
+
+    ax6 = plt.subplot(gs[2, 1])
+    ax6.set_ylabel('Error')
+    #ax6.plot(calculate_online_initialisation.error_vector, label='Error')
+    ax6.plot(calculate_online_initialisation.constant_bias_error_vector, label='Constant bias error')
+    ax6.plot(calculate_online_initialisation.linear_bias_error_vector, label='Linear bias error')
+    ax6.plot(calculate_online_initialisation.constant_bias_vector, label='Constant bias')
+    ax6.plot(calculate_online_initialisation.linear_bias_vector, label='Linear bias')
+
+    ax6.legend()
+    ax7 = ax6.twinx()
+    ax7.plot(calculate_online_initialisation.error_vector, label='Error GT', c='r')
+    ax7.set_yscale('log')
+    ax7.legend()
+
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+# template for the simulations
+def run_simulation_template():
+
+    calculate_online_initialisation = CalculateOnlineInitialisation()
+    calculate_online_initialisation.randomise_environment()
+
+    unknown_anchor = calculate_online_initialisation.drone_sim.unknown_anchors[0]
+    calculate_online_initialisation.reset_metrics(unknown_anchor.anchor_ID)
+    trajectory_copy = copy.deepcopy(calculate_online_initialisation.drone_sim.drone_trajectory)
+    calculate_online_initialisation.uwb_online_initialisation.trajectory = trajectory_copy
+    
+    
+
+    # Calculate the measurement vector to use for the simulation (Needed to compare methods on the same data)
+    measurement_vector = None
+    # measurement_vector = calculate_online_initialisation.gather_measurements()
+
+    # If needed to compare, start the loop here 
+
+    # Set parameters for the simulation here
+    calculate_online_initialisation.uwb_online_initialisation.params['rough_estimate_method'] = "linear_reweighted" 
+
+    # Run the simulation
+    calculate_online_initialisation.run_pipeline_full(measurement_vector)
+
+    # Save the error values / other metrics before the next iteration with different parameters
+
+    # Prepare the rows to write to the CSV file
+    row = [calculate_online_initialisation.error_vector]
+    
+    csv_file = csv_dir / 'error_vector.csv'
+    calculate_online_initialisation.save_row_to_csv(csv_file, row)
+
+
+    
 
         
-        calculate_online_initialisation.uwb_online_initialisation.params['non_linear_optimisation_type'] = 'IRLS'
-        estimator, covariance = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(measurement_vector, estimator_linear)
 
-        estimators.append(estimator)
-        covariances.append(covariance)
-
-        outliers = calculate_online_initialisation.uwb_online_initialisation.outlier_finder(residuals_linear)
-
-        for outlier in outliers[::-1]:
-            measurement_vector.pop(outlier)
-
-        clustered_measurements = calculate_online_initialisation.uwb_online_initialisation.cluster_measurements(measurement_vector, 15)
-        estimator, covariance = calculate_online_initialisation.uwb_online_initialisation.estimate_anchor_position_non_linear_least_squares(clustered_measurements, estimator_linear)
-
-        estimators.append(estimator)
-        covariances.append(covariance)    
-
-
-        # Save error values to CSV
-
-        linear_error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimator_linear[:3])
-        linear_error_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimator_linear)
-        linear_linear_bias_error = np.linalg.norm(estimator_linear[4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_constant_bias_error = np.linalg.norm(estimator_linear[3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-
-        error = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates(), estimators[0][:3])
-        error_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[0])
-
-        error_cluster = calculate_online_initialisation.uwb_online_initialisation.calculate_position_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1][:3])
-        error_cluster_full = calculate_online_initialisation.uwb_online_initialisation.calculate_estimator_error(calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_gt_estimator(), estimators[1])
-
-
-        number_of_measurements = len(measurement_vector)
-
-        min_angle_between_two_consecutive_measurements = np.rad2deg(np.atan(calculate_online_initialisation.uwb_online_initialisation.params['distance_to_anchor_ratio_threshold']))
-
-        anchor_position_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].get_anchor_coordinates()
-        anchor_distances_gt = np.linalg.norm([np.array(row[:3]) - np.array(anchor_position_gt) for row in measurement_vector] , axis=1)
-
-        measured_noise_mean = np.mean(np.abs(anchor_distances_gt - np.array(measurement_vector)[:, 3]))
-        measured_noise_var = np.var(np.abs(anchor_distances_gt - np.array(measurement_vector)[:, 3]))
-
-        min_distance_to_anchor = np.min(anchor_distances_gt)
-        max_distance_to_anchor = np.max(anchor_distances_gt)
-        mean_distance_to_anchor = np.mean(anchor_distances_gt)
-        std_distance_to_anchor = np.std(anchor_distances_gt)
-
-        angular_span_azimuth, angular_span_elevation = calculate_online_initialisation.compute_angular_span_around_point([row[:3] for row in measurement_vector], anchor_position_gt)
-
-        constant_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].bias
-        linear_bias_gt = calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias
-
-        linear_bias_error = np.linalg.norm(estimators[0][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        linear_bias_error_cluster = np.linalg.norm(estimators[1][4] - calculate_online_initialisation.drone_sim.unknown_anchors[0].linear_bias)
-        
-        
-        constant_bias_error = np.linalg.norm(estimators[0][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-        constant_bias_error_cluster = np.linalg.norm(estimators[1][3] - calculate_online_initialisation.drone_sim.unknown_anchors[0].bias)
-
-        noise_variance = calculate_online_initialisation.drone_sim.unknown_anchors[0].noise_variance
-        outlier_probability = calculate_online_initialisation.drone_sim.unknown_anchors[0].outlier_probability
-
-        row = [number_of_measurements, min_angle_between_two_consecutive_measurements, min_distance_to_anchor, max_distance_to_anchor, mean_distance_to_anchor, std_distance_to_anchor, angular_span_elevation, angular_span_azimuth, constant_bias_gt, linear_bias_gt, measured_noise_mean, noise_variance, measured_noise_var, outlier_probability, linear_error, linear_error_full, linear_linear_bias_error, linear_constant_bias_error, error, error_full, constant_bias_error, linear_bias_error, error_cluster, error_cluster_full, constant_bias_error_cluster, linear_bias_error_cluster]
-
-        # Open a CSV file in append mode
-        with open(path, 'a', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(row)
 
 if __name__ == '__main__':
     
 
-    # run_simulation_metrics()
-    run_simulation_linear_least_squares_comparison()
+    # TODO: SIMULATIONS NEEDED
+
+    # Comparison of different bias methods used in the linear least squares
+        # Simple linear
+        # Linear with outlier filtering
+        # Linear with weights
+        # Linear with outlier filtering and weights
+
+    # Visualisation of the stopping criterion, their robustness and the effect on the error
+        # In particular look at the percentage of failures
+
+    # Comparison of different non_linear optimisation methods
+        # IRLS
+        # Levenberg-Marquardt
+        # Trust Region Reflective with bounds ?
+
+    # Comparison of the effect of regularisation on the error
+        # only final error or also convergence of the error
+
+    # Comparison of the need to use the trimmed least square after the reweighted least squares
+
+    # Comparison of the effect of the outlier filtering on the error in the reweighted least squares
+
+    # Comparison of the effect of the outlier filtering on the error in the non-linear least squares
+
+    
+    
+
+
+
+
+
+    #run_simulation()
+
+    # run_simulation_stopping_metrics_comparison()
+    # run_simulation_linear_least_squares_comparison()
+    run_simulation_visualisation_trajectory_optimisation()
     # run_simulation_non_linear_least_squares_comparison()
+    # run_simulation_visualisation()
+
     # run_simulation_outlier_filtering_comparison()
     # run_simulation_clustering_comparison()
     # run_simulation_trajectory_optimisation_comparison()
     # run_simulation_residual_analysis()
     # run_simulation_error_debugging()
+    # run_full_simulation_visual()

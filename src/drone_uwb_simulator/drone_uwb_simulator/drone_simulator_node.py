@@ -301,6 +301,8 @@ class DroneSimulationNode(Node):
         self.drone_simulation.drone_trajectory.spline_y = self.optimised_spline_y
         self.drone_simulation.drone_trajectory.spline_z = self.optimised_spline_z
 
+        self.drone_simulation.drone_progress = 0
+
 
 
 

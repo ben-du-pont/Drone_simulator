@@ -8,7 +8,7 @@ import time
 
 class DroneSimulation():
 
-    def __init__(self, dt = 0.05, drone_speed = 1, number_of_waypoints = 15, bounds = [20, 20, 20]):
+    def __init__(self, dt = 0.05, drone_speed = 1, number_of_waypoints = 15, bounds = [5, 5, 5]):
         """Initialise the drone simulation class."""
 
         self.waypoints = None # Stores the main Waypoint objects of the drone trajectory
@@ -73,11 +73,16 @@ class DroneSimulation():
         y4 = np.random.uniform(-self.environment_bound_y/2, self.environment_bound_y/2)
         z4 = np.random.uniform(0, self.environment_bound_z/2)
 
+        x5 = np.random.uniform(-self.environment_bound_x/2, self.environment_bound_x/2)
+        y5 = np.random.uniform(-self.environment_bound_y/2, self.environment_bound_y/2)
+        z5 = np.random.uniform(0, self.environment_bound_z/2)
+
 
         self.waypoints = [
             Waypoint(x1, y1, z1),
             Waypoint(x3, y3, z3),
             Waypoint(x4, y4, z4),
+            Waypoint(x5, y5, z5),
             Waypoint(x2, y2, z2)
         ]
 

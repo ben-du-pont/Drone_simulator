@@ -18,15 +18,7 @@ csv_path = csv_dir / 'metrics.csv'
 
 
 
-
-# Check from when the ground truth error is below 0.1 and stays below 0.1
-# Look at the value of the GDOP at that point and the slope ?
-
-# Average this for all the runs and get the std_dev
-
-# Get the most stable crtierion to use
-
-
+# Preprocess the data to be able to read it in the panda dataframe as arrays
 def convert_str_to_list(s):
     # Replace 'nan', 'inf', and '-inf' with their corresponding numpy constants
     s = s.replace('nan', 'np.nan').replace('inf', 'np.inf').replace('-inf', '-np.inf')
@@ -37,6 +29,7 @@ def convert_str_to_list(s):
         # If evaluation fails, return the original string
         return s
 
+# Define a function to calculate the element-wise inverse of a vector, used for the determinant of the FIM
 def elementwise_inverse(vector):
     # Convert to numpy array to handle element-wise operations
     vector_np = np.array(vector)
@@ -44,6 +37,7 @@ def elementwise_inverse(vector):
     vector_np = np.where(vector_np == 0, np.nan, vector_np)
     return 1 / vector_np
 
+# Define a function to find the index where the error first falls below the threshold and stays below it
 def find_convergence_index(error_vector, threshold):
     """
     Find the index where the error first falls below the threshold and stays below it.
@@ -63,6 +57,7 @@ def extract_criterion_value(criterion_vector, index):
         return np.nan
     return criterion_vector[int(index)]
 
+# Find and extract the value of the stopping criterion at different thresholds to add them to the dataframe for analysis
 def calculate_criteria_at_thresholds(df, thresholds=[10, 5, 1]):
     """
     Calculate the criterion values at which the error falls below specified thresholds.
@@ -74,6 +69,8 @@ def calculate_criteria_at_thresholds(df, thresholds=[10, 5, 1]):
         df[f'condition_number_at_{threshold}'] = df.apply(lambda row: extract_criterion_value(np.array(row['condition_number_vector']), row[f'convergence_index_{threshold}']), axis=1)
         df[f'residuals_at_{threshold}'] = df.apply(lambda row: extract_criterion_value(np.array(row['residuals_vector']), row[f'convergence_index_{threshold}']), axis=1)
         df[f'covariances_at_{threshold}'] = df.apply(lambda row: extract_criterion_value(np.array(row['covariances_vector']), row[f'convergence_index_{threshold}']), axis=1)
+        df[f'verification_vector_at_{threshold}'] = df.apply(lambda row: extract_criterion_value(np.array(row['verification_vector']), row[f'convergence_index_{threshold}']), axis=1)
+        df[f'delta_pos_vector_at_{threshold}'] = df.apply(lambda row: extract_criterion_value(np.array(row['delta_pos_vector']), row[f'convergence_index_{threshold}']), axis=1)
 
         # Calculate number of measurements to reach the threshold
         df[f'num_measurements_at_{threshold}'] = df[f'convergence_index_{threshold}'] + 1  # Index is zero-based, so add 1
@@ -81,13 +78,7 @@ def calculate_criteria_at_thresholds(df, thresholds=[10, 5, 1]):
 
     return df
 
-# Read the data from the CSV file
-data = pd.read_csv(csv_path, header=None, converters={i: convert_str_to_list for i in range(6)})
-data.columns = ['gdop_vector', 'fim_vector', 'condition_number_vector', 'residuals_vector', 'covariances_vector','error_vector']
-
-# Add a column equal toumn inverse of the fim_vector column
-data['inverse_fim_vector'] = data['fim_vector'].apply(elementwise_inverse)
-
+# Find the locations of NaN values in a DataFrame and remove them to avoid problems
 def find_nan_locations(df):
     """
     Finds the locations of NaN values in a DataFrame where each cell contains a numpy array.
@@ -102,12 +93,14 @@ def find_nan_locations(df):
     
     def has_nan(array):
         """Check if the numpy array contains NaN."""
+        array = np.array(array).tolist()
         return np.isnan(array).any()
 
     # Iterate over DataFrame rows and columns to locate NaNs
     for row_index, row in df.iterrows():
         for col_name, array in row.items():
             if has_nan(array):
+                
                 nan_indices = np.where(np.isnan(array))[0]
                 for nan_index in nan_indices:
                     nan_locations.append((row_index, col_name, nan_index))
@@ -149,50 +142,28 @@ def remove_invalid_indices(df):
     
     return cleaned_df
 
-nan_locations = find_nan_locations(data)
 
-# print("NaN Locations:")
-# print(nan_locations)
+
+# Read the data from the CSV file
+data = pd.read_csv(csv_path, header=None, converters={i: convert_str_to_list for i in range(10)})
+data.columns = ['gdop_vector', 'fim_vector', 'condition_number_vector', 'residuals_vector', 'covariances_vector', 'verification_vector', 'delta_pos_vector', 'error_vector', 'constant_bias_error_vector', 'linear_bias_error_vector']
+
+# Add a column equal toumn inverse of the fim_vector column
+data['inverse_fim_vector'] = data['fim_vector'].apply(elementwise_inverse)
+
+
+# Process the data
+nan_locations = find_nan_locations(data)
 data = remove_invalid_indices(data)
 
-nan_locations = find_nan_locations(data)
 
-# print("NaN Locations:")
-# print(nan_locations)
-
-
-def find_nan_locations(df):
-    """
-    Finds the locations of NaN values in a DataFrame where each cell contains a numpy array.
-    
-    Parameters:
-    df (pd.DataFrame): DataFrame where each cell contains a numpy array.
-    
-    Returns:
-    List[Tuple[int, str, int]]: List of tuples containing (row_index, column_name, array_index) where NaN is found.
-    """
-    nan_locations = []
-    
-    def has_nan(array):
-        """Check if the numpy array contains NaN."""
-        return np.isnan(array).any()
-
-    # Iterate over DataFrame rows and columns to locate NaNs
-    for row_index, row in df.iterrows():
-        for col_name, array in row.items():
-            if has_nan(array):
-                nan_indices = np.where(np.isnan(array))[0]
-                for nan_index in nan_indices:
-                    nan_locations.append((row_index, col_name, nan_index))
-    
-    return nan_locations
-
+# Grouped function to plot the boxplots of the different stopping criterion metrics at different error thresholds
 def plot_criteria_variance(df, thresholds=[10, 5, 1]):
     plt.figure(figsize=(18, 12))
-    criteria = ['gdop', 'fim', 'condition_number', 'residuals', 'covariances']
+    criteria = ['gdop', 'fim', 'condition_number', 'residuals', 'covariances', 'verification_vector', 'delta_pos_vector']
     
     for i, criterion in enumerate(criteria):
-        plt.subplot(2, 3, i + 1)
+        plt.subplot(3, 3, i + 1)
         data = []
         for threshold in thresholds:
             col_name = f'{criterion}_at_{threshold}'
@@ -205,7 +176,7 @@ def plot_criteria_variance(df, thresholds=[10, 5, 1]):
         plt.title(f'{criterion.capitalize()} at Different Error Thresholds')
 
     # Plot the number of measurements needed
-    plt.subplot(2, 3, len(criteria) + 1)
+    plt.subplot(3, 3, len(criteria) + 1)
     num_measurements_data = []
     for threshold in thresholds:
         col_name = f'num_measurements_at_{threshold}'
@@ -220,14 +191,25 @@ def plot_criteria_variance(df, thresholds=[10, 5, 1]):
     plt.tight_layout()
     plt.show()
 
+
 data = calculate_criteria_at_thresholds(data, thresholds=[20, 10, 5, 2, 1])
 plot_criteria_variance(data,thresholds=[20, 10, 5, 2, 1])
 
+
+
+
+
+
+
+
+
+
+## Plot different scenarios, to visualise what is happening
+
 csv_index = 11 # Index of the run to plot for better visualisation
+csv_files_to_display = 10
 
-print(data.head())
-
-for csv_index in range(0, len(data)):
+for csv_index in range(0, min(len(data), csv_files_to_display)):
     # Assuming you have data for metrics and ground truth error
     measurement_indices = range(len(data.iloc[csv_index]['gdop_vector']))
 
@@ -235,16 +217,16 @@ for csv_index in range(0, len(data)):
     plt.figure(figsize=(14, 10))
 
     # Subplot 1: FIM vs. Measurement Index
-    plt.subplot(3, 2, 1)
+    plt.subplot(3, 3, 1)
     plt.plot(measurement_indices, data.iloc[csv_index]['inverse_fim_vector'], color='b', label='FIM')
     plt.yscale('log')
     plt.ylabel('FIM', color='b')
     plt.tick_params(axis='y', colors='b')
 
-
-
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -252,7 +234,7 @@ for csv_index in range(0, len(data)):
     plt.title('FIM vs. Ground Truth Error')
 
     # Subplot 2: GDOP vs. Measurement Index
-    plt.subplot(3, 2, 2)
+    plt.subplot(3, 3, 2)
     plt.plot(measurement_indices, data.iloc[csv_index]['gdop_vector'], color='b', label='GDOP')
     plt.yscale('log')
     plt.ylabel('GDOP', color='b')
@@ -260,6 +242,8 @@ for csv_index in range(0, len(data)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -267,7 +251,7 @@ for csv_index in range(0, len(data)):
     plt.title('GDOP vs. Ground Truth Error')
 
     # Subplot 3: RMS Residuals vs. Measurement Index
-    plt.subplot(3, 2, 3)
+    plt.subplot(3, 3, 3)
     plt.plot(measurement_indices, data.iloc[csv_index]['residuals_vector'], color='b', label='RMS Residuals')
     plt.yscale('log')
     plt.ylabel('RMS Residuals', color='b')
@@ -275,6 +259,8 @@ for csv_index in range(0, len(data)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -282,7 +268,7 @@ for csv_index in range(0, len(data)):
     plt.title('RMS Residuals vs. Ground Truth Error')
 
     # Subplot 4: Condition Number vs. Measurement Index
-    plt.subplot(3, 2, 4)
+    plt.subplot(3, 3, 4)
     plt.plot(measurement_indices, data.iloc[csv_index]['condition_number_vector'], color='b', label='Condition Number')
     plt.yscale('log')
     plt.ylabel('Condition Number', color='b')
@@ -290,6 +276,8 @@ for csv_index in range(0, len(data)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -297,7 +285,7 @@ for csv_index in range(0, len(data)):
     plt.title('Condition Number vs. Ground Truth Error')
 
     # Subplot 5: Covariance Eigenvalues vs. Measurement Index
-    plt.subplot(3, 2, 5)
+    plt.subplot(3, 3, 5)
     plt.plot(measurement_indices, data.iloc[csv_index]['covariances_vector'], color='b', label='Covariance Eigenvalues')
     plt.yscale('log')
     plt.ylabel('Covariance Eigenvalues', color='b')
@@ -305,12 +293,48 @@ for csv_index in range(0, len(data)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
 
     plt.title('Covariance Eigenvalues vs. Ground Truth Error')
 
+    # Subplot 6: Verification Vector vs. Measurement Index
+    plt.subplot(3, 3, 6)
+    plt.plot(measurement_indices, data.iloc[csv_index]['verification_vector'], color='b', label='Verification Vector')
+    plt.yscale('log')
+    plt.ylabel('Verification Vector', color='b')
+    plt.tick_params(axis='y', colors='b')
+
+    plt.twinx()
+    plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    plt.yscale('log')
+    plt.ylabel('Ground Truth Error', color='r')
+    plt.tick_params(axis='y', colors='r')
+
+    plt.title('Verification Vector vs. Ground Truth Error')
+
+    # Subplot 7: Delta Pos Vector vs. Measurement Index
+    plt.subplot(3, 3, 7)
+    plt.plot(measurement_indices, data.iloc[csv_index]['delta_pos_vector'], color='b', label='Delta Pos Vector')
+    plt.yscale('log')
+    plt.ylabel('Delta Pos Vector', color='b')
+    plt.tick_params(axis='y', colors='b')
+
+    plt.twinx()
+    plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    plt.yscale('log')
+    plt.ylabel('Ground Truth Error', color='r')
+    plt.tick_params(axis='y', colors='r')
+
+    plt.title('Delta Pos Vector vs. Ground Truth Error')
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
@@ -337,7 +361,7 @@ for csv_index in range(0, len(data)):
 
 
 
-
+# Plot the value of the metric at the end vs the error to look for correlations
 
 def extract_final_values(df, columns):
     final_values = {}
@@ -348,7 +372,6 @@ def extract_final_values(df, columns):
     final_values['error'] = df['error_vector'].apply(lambda x: x[-1] if len(x) > 0 else np.nan)
     
     return pd.DataFrame(final_values)
-
 
 metrics_columns = ['gdop_vector', 'inverse_fim_vector', 'condition_number_vector', 'residuals_vector', 'covariances_vector']
 final_values_df = extract_final_values(data, metrics_columns)
