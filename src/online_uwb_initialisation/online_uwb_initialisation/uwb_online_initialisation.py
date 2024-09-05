@@ -184,7 +184,6 @@ class UwbOnlineInitialisation:
         except np.linalg.LinAlgError:
             return float('inf')  # Matrix is singular, cannot compute GDOP
 
-
     def compute_FIM(self, measurements, target_estimator, noise_variance):
         """
         Computes the Fisher Information Matrix (FIM) for the parameters (x0, y0, z0, gamma, beta)

@@ -1049,7 +1049,7 @@ def run_simulation_visualisation_trajectory_optimisation():
         
         calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.method = calculate_online_initialisation.uwb_online_initialisation.params["trajectory_optimisation_method"]
         # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
-        optimal_waypoints = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.optimize_waypoints_incrementally_spherical(anchor_estimator, anchor_estimate_variance, previous_measurement_positions, remaining_trajectory, radius_of_search = 1, max_waypoints=8, marginal_gain_threshold=0.01)
+        optimal_waypoints = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.optimize_waypoints_incrementally_spherical(anchor_estimator, anchor_estimate_variance, previous_measurement_positions, remaining_trajectory, radius_of_search = 0.5, max_waypoints=5, marginal_gain_threshold=0.01)
         
         # Create a spline trajectory from the optimal waypoints, to collect the measurements but also go back to the initial mission
         optimal_trajectory = calculate_online_initialisation.uwb_online_initialisation.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
