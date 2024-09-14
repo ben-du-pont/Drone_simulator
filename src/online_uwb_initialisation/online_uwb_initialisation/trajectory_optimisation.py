@@ -20,6 +20,7 @@ class TrajectoryOptimization:
         self.fim_noise_variance = 0.2  # Noise variance for the FIM calculation
         self.method = "FIM"  # Method to use for optimization (FIM or GDOP)
         self.initial_guess = [0, 0, 0]  # Initial guess for the optimization algorithm
+        self.bounds = [(-6,6),(-6,6),(0.2, 8)]# [(float('inf'), float('inf')), (float('inf'), float('inf')), (float('inf'), float('inf'))]  # Bounds for the optimization algorithm
 
     def calculate_fim(self, target_estimator, measurements, noise_variance):
         """
@@ -182,6 +183,60 @@ class TrajectoryOptimization:
         z = r * np.cos(theta) + center[2]
         return x, y, z
         
+    def get_spherical_bounds(self, center, radius):
+        cartesian_bounds = self.bounds
+
+        x_min, x_max = cartesian_bounds[0]
+        y_min, y_max = cartesian_bounds[1]
+        z_min, z_max = cartesian_bounds[2]
+        x_c, y_c, z_c = center
+
+        # Bounds for theta (from z-bounds)
+        theta_min, theta_max = 0, np.pi  # Default bounds for theta
+
+        if z_c > z_max:
+            theta_min = None
+            theta_max = None
+        if z_c < z_min:
+            theta_min = None
+            theta_max = None
+
+        if abs(z_c - z_max) < radius:
+            theta_min = np.arccos((z_max - z_c) / radius)
+        if abs(z_c - z_min) < radius:
+            theta_max = np.arccos((z_min - z_c) / radius)
+
+        # Bounds for phi (from x and y bounds)
+        phi_min, phi_max = 0, 2 * np.pi  # Default bounds for phi
+
+        if x_c > x_max:
+            phi_min = None
+            phi_max = None
+        if x_c < x_min:
+            phi_min = None
+            phi_max = None
+        
+        if abs(x_c - x_max) < radius:
+            phi_min = np.arccos((x_max - x_c) / radius)
+        if abs(x_c - x_min) < radius:
+            phi_max = np.arccos((x_min - x_c) / radius)
+
+        if y_c > y_max:
+            phi_min = None
+            phi_max = None
+
+        if y_c < y_min:
+            phi_min = None
+            phi_max = None
+        
+        if abs(y_c - y_max) < radius:
+            phi_min = np.arccos((y_max - y_c) / radius)
+        if abs(y_c - y_min) < radius:
+            phi_max = np.arccos((y_min - y_c) / radius)
+
+
+        return (theta_min, theta_max), (phi_min, phi_max)
+
     def optimize_waypoints_incrementally_spherical(self, anchor_estimator, anchor_estimate_variance, previous_measurements, remaining_trajectory, radius_of_search = 1, max_waypoints=8, marginal_gain_threshold=0.01):
         anchor_estimate = anchor_estimator[:3]
         
@@ -213,7 +268,6 @@ class TrajectoryOptimization:
                     return gdop
                 elif self.method == "FIM":
                     fim_gain = self.evaluate_fim(new_measurement, anchor_estimator, anchor_estimate_variance, previous_measurements)
-                    print(f"FIM det: {fim_gain}")
                     return fim_gain  # Objective: Minimize inverse FIM determinant
 
             # Define bounds for new measurement within the specified bounds
@@ -222,6 +276,14 @@ class TrajectoryOptimization:
                 (0, 2*np.pi)
             ]
 
+            bounds = self.get_spherical_bounds(last_measurement, current_radius)
+            bounds_theta = bounds[0]
+            bounds_psi = bounds[1]
+
+
+            if None in bounds_theta or None in bounds_psi:
+                    print("Optimisation not possible in the specified bounds")
+                    break
             
 
             # Optimize for the next waypoint
@@ -240,18 +302,15 @@ class TrajectoryOptimization:
                 # Check marginal gain
                 if self.method == "GDOP":
                     gdop_gain = previous_gdop - new_gdop
-                    print(f"NEW GDOP: {new_gdop}")
-                    print(f"Marginal gain: {gdop_gain/previous_gdop}")
+
                     if gdop_gain/previous_gdop < marginal_gain_threshold:
                         print(f"Marginal gain below threshold: {gdop_gain/previous_gdop}. Stopping optimization.")
                         break
                 elif self.method == "FIM":
                     fim_gain = previous_fim_det - new_fim_det
-                    print(f"NEW FIM det: {new_fim_det}")
-                    print(f"Marginal gain: {fim_gain/previous_fim_det}")
+
                     if fim_gain/previous_fim_det < marginal_gain_threshold:
                         print(f"Marginal gain below threshold: {fim_gain/previous_fim_det}. Stopping optimization.")
-                        print(f"Number of waypoints: {len(best_waypoints)}")
                         break
 
                 # Update best waypoints and metrics
@@ -264,7 +323,7 @@ class TrajectoryOptimization:
                 last_measurement = new_waypoint
 
             else:
-                print(f"Optimization failed at waypoint {_ + 1}")
+                print(f"Optimization failed at waypoint {i + 1}")
                 break
 
             # Initial guess for the next waypoint
@@ -283,7 +342,7 @@ class TrajectoryOptimization:
 
         last_measurement = previous_measurements[-1]
 
-        for _ in range(max_waypoints):
+        for i in range(max_waypoints):
             def objective(new_measurement):
                 new_measurement = np.array(new_measurement).reshape(1, -1)
                 if self.method == "GDOP":
@@ -317,15 +376,12 @@ class TrajectoryOptimization:
                 # Check marginal gain
                 if self.method == "GDOP":
                     gdop_gain = previous_gdop - new_gdop
-                    print(f"NEW GDOP: {new_gdop}")
-                    print(f"Marginal gain: {gdop_gain/previous_gdop}")
                     if gdop_gain/previous_gdop < marginal_gain_threshold:
                         print(f"Marginal gain below threshold: {gdop_gain/previous_gdop}. Stopping optimization.")
                         break
                 elif self.method == "FIM":
                     fim_gain = previous_fim_det - new_fim_det
-                    print(f"NEW FIM det: {new_fim_det}")
-                    print(f"Marginal gain: {fim_gain/previous_fim_det}")
+
                     if fim_gain/previous_fim_det < marginal_gain_threshold:
                         print(f"Marginal gain below threshold: {fim_gain/previous_fim_det}. Stopping optimization.")
                         break
@@ -340,85 +396,66 @@ class TrajectoryOptimization:
                 last_measurement = new_waypoint
 
             else:
-                print(f"Optimization failed at waypoint {_ + 1}")
+                print(f"Optimization failed at waypoint {i + 1}")
                 break
 
         return best_waypoints
     
-
-    def create_optimal_trajectory(self, initial_position, optimal_points):
-        """Create the optimal trajectory for the drone to follow given the initial position and the waypoints
+    def compute_new_mission_waypoints(self, initial_position, initial_remaining_waypoints, optimal_waypoints, method="return_to_closest"):
+        """Compute the new mission waypoints based on the initial position, initial waypoints, and optimal waypoints
         
         Parameters:
         - initial_position: list of floats, the initial position of the drone [x, y, z]
-        - waypoints: list of lists, the waypoints to follow
+        - initial_waypoints: list of lists, the initial waypoints to follow
+        - optimal_waypoints: list of lists, the optimal waypoints to follow
+        - method: str, the method to use to compute the new mission waypoints
         
         Returns:
-        - spline_x: list of floats, the x component of the spline
-        - spline_y: list of floats, the y component of the spline
-        - spline_z: list of floats, the z component of the spline
+        - new_mission_waypoints: list of lists, the new mission waypoints to follow
         """
-
-        if len(optimal_points) < 2:
-            return Trajectory()
         
-        trajectory = Trajectory()
-        waypoints = []
-        waypoints.append(Waypoint(initial_position[0], initial_position[1], initial_position[2]))
-
-        for waypoint in optimal_points:
-            waypoints.append(Waypoint(waypoint[0], waypoint[1], waypoint[2]))
-
-        trajectory.construct_trajectory_spline(waypoints)
-
-        return trajectory
-    
-    def create_link_from_deviation_to_initial_trajectory(self, initial_trajectory, optimal_trajectory_points):
+        new_mission_waypoints = []
         
-        if len(optimal_trajectory_points) < 2:
-            return initial_trajectory
-        
-        trajectory = Trajectory()
-        optimal_trajectory_waypoints = []
-        for point in optimal_trajectory_points:
+        def closest_point_on_line(A, B, C):
+            # Convert points to numpy arrays
+            A = np.array(A)
+            B = np.array(B)
+            C = np.array(C)
             
-            optimal_trajectory_waypoints.append(Waypoint(point[0], point[1], point[2]))
+            # Vector AB and AC
+            AB = B - A
+            AC = C - A
+            
+            # Project AC onto AB
+            t = np.dot(AC, AB) / np.dot(AB, AB)
+            
+            # Find the closest point P on the line
+            P = A + t * AB
+            
+            return P
 
-        initial_position = optimal_trajectory_waypoints[0].x, optimal_trajectory_waypoints[0].y, optimal_trajectory_waypoints[0].z
+        if method == "return_to_initial":
+            new_mission_waypoints.extend(optimal_waypoints)
+            new_mission_waypoints.append(initial_position)
+            new_mission_waypoints.extend(initial_remaining_waypoints)
+            link_waypoints = [initial_position]
 
-        def find_closest_point_index(trajectory, point):
+        if method == "straight_to_wapoint":
+            new_mission_waypoints.extend(optimal_waypoints)
+            new_mission_waypoints.extend(initial_remaining_waypoints)
+            link_waypoints = []
 
-            distances = np.sqrt((trajectory.spline_x - point[0])**2 + 
-                                (trajectory.spline_y - point[1])**2 + 
-                                (trajectory.spline_z - point[2])**2)
-            return np.argmin(distances)
+        if method == "return_to_closest":
+            closest_point = closest_point_on_line(initial_position, initial_remaining_waypoints[0], optimal_waypoints[-1])
+            new_mission_waypoints.extend(optimal_waypoints)
+            new_mission_waypoints.append(closest_point)
+            new_mission_waypoints.extend(initial_remaining_waypoints)
+            link_waypoints = [closest_point]
+        
+        return new_mission_waypoints, optimal_waypoints, link_waypoints, initial_remaining_waypoints
 
-        closest_index = find_closest_point_index(initial_trajectory, initial_position)
 
-        cut_initial_trajectory = initial_trajectory
-        cut_initial_trajectory.spline_x = initial_trajectory.spline_x[closest_index:]
-        cut_initial_trajectory.spline_y = initial_trajectory.spline_y[closest_index:]
-        cut_initial_trajectory.spline_z = initial_trajectory.spline_z[closest_index:]
 
-        final_waypoint = optimal_trajectory_waypoints[-1]
-
-        closest_index = find_closest_point_index(cut_initial_trajectory, [final_waypoint.x, final_waypoint.y, final_waypoint.z])
-        closest_point = Waypoint(cut_initial_trajectory.spline_x[closest_index], cut_initial_trajectory.spline_y[closest_index], cut_initial_trajectory.spline_z[closest_index])
-
-        cut_final_trajectory = cut_initial_trajectory
-        cut_final_trajectory.spline_x = cut_initial_trajectory.spline_x[closest_index:]
-        cut_final_trajectory.spline_y = cut_initial_trajectory.spline_y[closest_index:]
-        cut_final_trajectory.spline_z = cut_initial_trajectory.spline_z[closest_index:]
-
-        trajectory.construct_trajectory_spline([final_waypoint, closest_point])
-
-        trajectory.spline_x = np.concatenate((trajectory.spline_x, cut_final_trajectory.spline_x,))
-        trajectory.spline_y = np.concatenate((trajectory.spline_y, cut_final_trajectory.spline_y,))
-        trajectory.spline_z = np.concatenate((trajectory.spline_z, cut_final_trajectory.spline_z,))
-
-        return trajectory
-
-    def create_full_optimised_trajectory(self, initial_position, optimal_points, initial_trajectory):
 
         optimal_trajectory = self.create_optimal_trajectory(initial_position, optimal_points)
         link_trajectory = self.create_link_from_deviation_to_initial_trajectory(initial_trajectory, optimal_points)
@@ -429,6 +466,7 @@ class TrajectoryOptimization:
         trajectory.spline_z = np.concatenate((optimal_trajectory.spline_z, link_trajectory.spline_z))
 
         return trajectory
+
 
 def main():
     # Create an instance of the TrajectoryOptimization class
@@ -474,7 +512,7 @@ def main():
     sampled_measurements = previous_measurements.tolist()
     #waypoints = trajectory_optimization.optimize_waypoints_incrementally_cubical(anchor_estimate=anchor_gt, previous_measurements=sampled_measurements, remaining_trajectory=[], bound_size=[3,3,3], max_waypoints=20, marginal_gain_threshold=0.01)
     waypoints = trajectory_optimization.optimize_waypoints_incrementally_spherical(anchor_estimate=anchor_gt, previous_measurements=sampled_measurements, remaining_trajectory=[], radius_of_search=2, max_waypoints=20, marginal_gain_threshold=0.05)
-    print(waypoints)
+
     
      # Plotting
     fig = plt.figure()

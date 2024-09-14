@@ -36,6 +36,8 @@ class Trajectory:
         self.spline_x = np.array([])
         self.spline_y = np.array([])
         self.spline_z = np.array([])
+
+        self.waypoints = []
         
 
     def calculate_arc_length(self, x, y, z):
@@ -64,6 +66,7 @@ class Trajectory:
 
     def construct_trajectory_spline(self, waypoints):
         """ Fits a spline through provided waypoints and samples it for constant speed movement. """
+        self.waypoints = waypoints
         x, y, z = zip(*[(wp.x, wp.y, wp.z) for wp in waypoints])
         arc_length = self.calculate_arc_length(x, y, z)
         cs_x, cs_y, cs_z = self.reparameterize_spline(arc_length, x, y, z)
@@ -96,6 +99,8 @@ class Trajectory:
     
     def construct_trajectory_linear(self, waypoints):
         """ Creates a linear trajectory between provided waypoints. """
+
+        self.waypoints = waypoints
         if not waypoints:
             # If no waypoints provided, return empty trajectory
             self.spline_x = np.array([])
@@ -115,7 +120,7 @@ class Trajectory:
             distance = np.linalg.norm(np.array([wp_end.x - wp_start.x, wp_end.y - wp_start.y, wp_end.z - wp_start.z]))
 
             # Calculate the number of points between waypoints based on speed and dt
-            num_points_between = int(distance / (self.speed * self.dt))
+            num_points_between = np.maximum(int(distance / (self.speed * self.dt)), 1)
 
             # Linearly interpolate between waypoints, excluding start point of first segment
             x_interp = np.linspace(wp_start.x if i == 0 else wp_start.x + (wp_end.x - wp_start.x) / num_points_between,

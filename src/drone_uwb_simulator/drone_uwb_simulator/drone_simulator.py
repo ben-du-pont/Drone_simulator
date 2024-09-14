@@ -107,7 +107,7 @@ class DroneSimulation():
 
         # Create trajectory
         self.drone_trajectory = Trajectory(speed=self.drone_speed, dt=self.dt)
-        self.drone_trajectory.construct_trajectory_spline(self.waypoints)
+        self.drone_trajectory.construct_trajectory_linear(self.waypoints)
 
         self.drone_position = self.waypoints[0].get_coordinates()
 
