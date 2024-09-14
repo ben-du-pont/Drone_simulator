@@ -74,8 +74,8 @@ class DraggablePoint:
         'Update the donut shape for the point'
         if self.donut_patch:
             self.donut_patch.remove()
-        outer = Point(center).buffer(np.sqrt((center[0] - self.anchor[0])**2 + (center[1] - self.anchor[1])**2) + 3 * self.std_dev)
-        inner = Point(center).buffer(max(np.sqrt((center[0] - self.anchor[0])**2 + (center[1] - self.anchor[1])**2) - 3 * self.std_dev, 0))
+        outer = Point(center).buffer(np.sqrt((center[0] - self.anchor[0])**2 + (center[1] - self.anchor[1])**2) + np.linalg.norm(np.array(center) - np.array(self.anchor))*self.std_dev)
+        inner = Point(center).buffer(max(np.sqrt((center[0] - self.anchor[0])**2 + (center[1] - self.anchor[1])**2) - np.linalg.norm(np.array(center) - np.array(self.anchor))* self.std_dev, 0))
         self.donut = outer.difference(inner)
         self.donut_patch = DraggablePoint.plot_polygon_with_hole(self.ax, self.donut, facecolor='blue', alpha=0.5)
 
@@ -147,7 +147,7 @@ class DraggablePoint:
             try:
                 inv_at_a = np.linalg.inv(A.T @ A)
                 gdop = np.sqrt(np.trace(inv_at_a))
-                return gdop
+                return gdop 
             except np.linalg.LinAlgError:
                 return None  # Matrix is singular, cannot compute GDOP
 
