@@ -1,0 +1,6 @@
+numpy==1.19.5
+pandas==1.1.5
+scipy==1.5.4
+copy==0.1.2
+matplotlib==3.2.2
+pathlib==1.0.1

@@ -9,7 +9,7 @@ from scipy.integrate import cumulative_trapezoid as cumtrapz
 
 # Waypoint class to store the coordinates of points through which the drone will pass
 class Waypoint:
-    """ Represents a waypoint in 3D space."""
+    """ Represents a waypoint for the drone to go to in 3D space."""
 
     def __init__(self, x, y, z):
         self.x = x
@@ -30,6 +30,7 @@ class Trajectory:
 
     def __init__(self, speed = 3, dt = 0.05):
         """Specify the desired speed and time interval for the trajectory helps to sample the trajectory at a constant speed. """
+
         self.speed = speed  # Desired speed of the drone (units per second)
         self.dt = dt        # Time interval at which to sample the trajectory
 
@@ -57,7 +58,7 @@ class Trajectory:
 
     def sample_spline(self, cs_x, cs_y, cs_z, total_length):
         """ Samples the spline evenly according to the desired speed and time interval. """
-        self.num_points = int(total_length / (self.speed * self.dt))
+        self.num_points = np.maximum(int(total_length / (self.speed * self.dt)), 1)
         even_arc_lengths = np.linspace(0, total_length, self.num_points)
         x = cs_x(even_arc_lengths)
         y = cs_y(even_arc_lengths)
@@ -73,6 +74,7 @@ class Trajectory:
         total_length = arc_length[-1]
         self.spline_x, self.spline_y, self.spline_z = self.sample_spline(cs_x, cs_y, cs_z, total_length)
 
+
     def find_closest_waypoint(self, current_position):
         """ Finds the index of the closest waypoint to the current position. """
         distances = np.sqrt((self.spline_x - current_position[0])**2 + 
@@ -80,6 +82,7 @@ class Trajectory:
                             (self.spline_z - current_position[2])**2)
         return np.argmin(distances)
     
+
     def get_waypoint(self, index):
         """ Returns the waypoint at the specified index. """
         return Waypoint(self.spline_x[index], self.spline_y[index], self.spline_z[index])
@@ -97,6 +100,7 @@ class Trajectory:
                 return self.get_waypoint(i+1)
         return self.get_waypoint(-1)
     
+
     def construct_trajectory_linear(self, waypoints):
         """ Creates a linear trajectory between provided waypoints. """
 
