@@ -184,7 +184,8 @@ class TrajectoryOptimization:
         return x, y, z
         
     def get_spherical_bounds(self, center, radius):
-        """Get the bounds for the local spherical coordinates given the center and radius
+        """
+        Get the bounds for the local spherical coordinates given the center and radius.
         
         Parameters:
         - center: list of floats, the center of the spherical coordinates [x_center, y_center, z_center]
@@ -193,12 +194,12 @@ class TrajectoryOptimization:
         Returns:
         - bounds_theta: tuple of floats, the bounds for the polar angle (theta) in radians
         - bounds_phi: tuple of floats, the bounds for the azimuthal angle (phi) in radians
+        - center_in_bounds: bool, whether the center is inside the Cartesian bounds
         """
 
-        cartesian_bounds = self.bounds # [(x_min, x_max), (y_min, y_max), (z_min, z_max)]
+        # Get the Cartesian bounds (x_min, x_max), (y_min, y_max), (z_min, z_max)
+        cartesian_bounds = self.bounds
 
-
-        # Helper function to find the intersection of two angular intervals
         def intersect_phi_intervals(phi1_min, phi1_max, phi2_min, phi2_max):
             if phi1_min is None or phi2_min is None:
                 return None, None
@@ -223,13 +224,11 @@ class TrajectoryOptimization:
         theta_min, theta_max = 0, np.pi  # Default bounds for theta
 
         if z_c > z_max:
-            theta_min = None
-            theta_max = None
             print("Optimisation not possible in the specified bounds, z_c > z_max")
+            return (None, None), (None, None)
         if z_c < z_min:
-            theta_min = None
-            theta_max = None
             print("Optimisation not possible in the specified bounds, z_c < z_min")
+            return (None, None), (None, None)
 
         # Here we apply a strict bounds strategy where we restrict the sphere by a half-sphere in directions that are outside the bounds
         if abs(z_c - z_max) < radius:
@@ -243,13 +242,16 @@ class TrajectoryOptimization:
         # x bounds check
         phi_min_x, phi_max_x = phi_min, phi_max  # Default for x
         if x_c > x_max:
-            phi_min_x = None
-            phi_max_x = None
+
             print("Optimisation not possible in the specified bounds, x_c > x_max")
+            return (None, None), (None, None)
         if x_c < x_min:
-            phi_min_x = None
-            phi_max_x = None
+
             print("Optimisation not possible in the specified bounds, x_c < x_min")
+            return (None, None), (None, None)
+
+
+
         if abs(x_c - x_max) < radius:
             phi_min_x = np.pi/2
             phi_max_x = 3*np.pi/2
@@ -260,13 +262,14 @@ class TrajectoryOptimization:
         # y bounds check
         phi_min_y, phi_max_y = phi_min, phi_max  # Default for y
         if y_c > y_max:
-            phi_min_y = None
-            phi_max_y = None
             print("Optimisation not possible in the specified bounds, y_c > y_max")
+            return (None, None), (None, None)
         if y_c < y_min:
-            phi_min_y = None
-            phi_max_y = None
+
             print("Optimisation not possible in the specified bounds, y_c < y_min")
+            return (None, None), (None, None)
+
+
         if abs(y_c - y_max) < radius:
             phi_min_y = np.pi
             phi_max_y = 2 * np.pi
@@ -292,7 +295,7 @@ class TrajectoryOptimization:
 
         anchor_estimate_variance = [var for var in anchor_estimate_variance]
 
-        best_waypoints = [] # Keep track of the best waypoints
+        best_waypoints = [drone_position] # Keep track of the best waypoints
 
         if self.method == "FIM":
             previous_fim_det = 1/np.linalg.det(self.compute_FIM(anchor_estimate, previous_measurements, anchor_estimate_variance))
@@ -371,9 +374,9 @@ class TrajectoryOptimization:
                 # Update best waypoints and metrics
                 best_waypoints.append(new_waypoint)
 
-                if np.linalg.norm(new_waypoint - anchor_estimate) < 2*radius_of_search:
-                    print(f"Got close enough to the anchor. Stopping optimization.")
-                    break
+                # if np.linalg.norm(new_waypoint - anchor_estimate) < 2*radius_of_search:
+                #     print(f"Got close enough to the anchor. Stopping optimization.")
+                #     break
 
                 previous_measurements = np.vstack([previous_measurements, new_waypoint])
 
@@ -692,6 +695,7 @@ class TrajectoryOptimization:
         - new_mission_waypoints: list of lists, the new mission waypoints to follow
         """
         
+        # Note: initial position is actually the previous passed waypoint
         new_mission_waypoints = []
         
         def closest_point_on_line(A, B, C):
@@ -705,10 +709,18 @@ class TrajectoryOptimization:
             AC = C - A
             
             # Project AC onto AB
-            t = np.dot(AC, AB) / np.dot(AB, AB)
+            if np.dot(AB, AB) == 0:
+                return A
+            else:
+                t = np.dot(AC, AB) / np.dot(AB, AB)
             
             # Find the closest point P on the line
             P = A + t * AB
+
+            if t < 0:
+                return A
+            if t > 1:
+                return B
             
             return P
 
@@ -734,8 +746,15 @@ class TrajectoryOptimization:
             
             return P
 
+        if not optimal_waypoints:
+            new_mission_waypoints.extend(initial_remaining_waypoints)
+            link_waypoints = []
+            return new_mission_waypoints, optimal_waypoints, link_waypoints, initial_remaining_waypoints
+        
 
-    
+
+
+
         if method == "strict_return":
             closest_point = closest_point_on_line(initial_position, initial_remaining_waypoints[0], optimal_waypoints[-1])
             new_mission_waypoints.extend(optimal_waypoints)
@@ -772,7 +791,8 @@ class TrajectoryOptimization:
             new_mission_waypoints.extend(optimal_waypoints)
             new_mission_waypoints.append(hybrid_point)
             new_mission_waypoints.extend(initial_remaining_waypoints)
-            link_waypoints = [closest_point]
+            link_waypoints = []
+            optimal_waypoints.append(closest_point)
         
         if method == "optimal":
             new_mission_waypoints.extend(optimal_waypoints)
@@ -781,7 +801,6 @@ class TrajectoryOptimization:
             new_mission_waypoints.extend(initial_remaining_waypoints)
 
         return new_mission_waypoints, optimal_waypoints, link_waypoints, initial_remaining_waypoints
-
 
 
 def main():

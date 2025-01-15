@@ -15,7 +15,7 @@ csv_path = csv_dir / 'linear_least_squares.csv'
 
 # Load the data
 data = pd.read_csv(csv_path, header=None)
-
+print(data.head())
 data.columns = ['number_of_measurements', 'min_angle_between_two_consecutive_measurements','min_distance_to_anchor', 'max_distance_to_anchor', 'mean_distance_to_anchor', 'std_distance_to_anchor', 'angular_span_elevation', 'angular_span_azimuth', 'constant_bias_gt', 'linear_bias_gt', 'measured_noise_mean', 'noise_variance', 'measured_noise_var', 'outlier_probability', 'error_t_t', 'error_t_t_full', 'constant_bias_error_true_true', 'linear_bias_error_true_true', 'error_t_f', 'error_t_f_full', 'linear_bias_error_true_false', 'error_f_t', 'error_f_t_full', 'constant_bias_error_false_true', 'error_f_f', 'error_f_f_full']
 
 # print("Length before filtering:", len(data))

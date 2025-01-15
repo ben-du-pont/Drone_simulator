@@ -2,7 +2,7 @@ import numpy as np
 
 class Anchor:
     """ Class representing an anchor in the UWB protocol."""
-    def __init__(self, ID, x, y, z, bias = 0, linear_bias = 1, noise_variance = 0.1, outlier_probability = 0.0, outlier_factor_range = [10, 30]):
+    def __init__(self, ID, x, y, z, bias = 0, linear_bias = 1, noise_variance = 0.1, outlier_probability = 0.0, outlier_factor_range = [0.2, 0.3]):
         self.anchor_ID = ID # Unique identifier of the anchor
         self.x = float(x)
         self.y = float(y)
@@ -27,11 +27,13 @@ class Anchor:
         if np.random.rand() < self.outlier_probability: # Generate an outlier distance
 
             factor = np.random.uniform(self.outlier_factor_range_min, self.outlier_factor_range_max)
-            distance += np.random.normal(3*factor, 2*self.noise_variance)
+
+            distance = distance + factor * distance
+            return distance
         else:
             distance += np.random.normal(0, self.noise_variance)
 
-        return distance
+            return distance
     
     def request_distance_gt(self, x, y, z):
         distance = np.linalg.norm([self.x - x, self.y - y, self.z - z])

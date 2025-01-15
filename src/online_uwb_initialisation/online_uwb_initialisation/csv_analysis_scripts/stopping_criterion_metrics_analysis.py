@@ -160,7 +160,14 @@ data = remove_invalid_indices(data)
 # Grouped function to plot the boxplots of the different stopping criterion metrics at different error thresholds
 def plot_criteria_variance(df, thresholds=[10, 5, 1]):
     plt.figure(figsize=(18, 12))
+    
+    # Criteria and corresponding titles and y-axis labels
     criteria = ['gdop', 'fim', 'condition_number', 'residuals', 'covariances', 'verification_vector', 'delta_pos_vector']
+    titles = ['GDOP', 'FIM determinant', 'Condition Number', 'Residuals median', 'Covariance of the estimate', 'Verification Vector', 'Position delta']
+    y_labels = ['GDOP', 'FIM determinant', 'Condition Number', 'Residuals median', 'Covariance of the estimate', 'Verification Vector', 'Position delta']
+    
+    # Define a color palette based on the number of thresholds
+    palette = sns.color_palette("coolwarm", len(thresholds))
     
     for i, criterion in enumerate(criteria):
         plt.subplot(3, 3, i + 1)
@@ -172,8 +179,16 @@ def plot_criteria_variance(df, thresholds=[10, 5, 1]):
         
         df_plot = pd.DataFrame(data, columns=['Threshold', f'{criterion}_value'])
         
-        sns.boxplot(x='Threshold', y=f'{criterion}_value', data=df_plot)
-        plt.title(f'{criterion.capitalize()} at Different Error Thresholds')
+        # Boxplot with colors by threshold, and remove outliers
+        sns.boxplot(x='Threshold', y=f'{criterion}_value', data=df_plot, palette=palette, showfliers=False)
+        
+        # Set the y-axis to log scale
+        plt.yscale('log')
+        
+        # Add title and y-labels based on the provided lists
+        plt.title(titles[i])
+        plt.ylabel(y_labels[i])
+        plt.xlabel('Error Threshold')
 
     # Plot the number of measurements needed
     plt.subplot(3, 3, len(criteria) + 1)
@@ -185,8 +200,15 @@ def plot_criteria_variance(df, thresholds=[10, 5, 1]):
     
     df_num_measurements = pd.DataFrame(num_measurements_data, columns=['Threshold', 'num_measurements'])
     
-    sns.boxplot(x='Threshold', y='num_measurements', data=df_num_measurements)
+    # Boxplot for the number of measurements with colors by threshold, removing outliers
+    sns.boxplot(x='Threshold', y='num_measurements', data=df_num_measurements, palette=palette, showfliers=False)
+    
+    # Set the y-axis to log scale for number of measurements
+    
+    # Add title and y-label for the number of measurements subplot
     plt.title('Number of Measurements to Reach Error Thresholds')
+    plt.ylabel('Number of Measurements')
+    plt.xlabel('Error Threshold')
     
     plt.tight_layout()
     plt.show()
@@ -207,7 +229,7 @@ plot_criteria_variance(data,thresholds=[20, 10, 5, 2, 1])
 ## Plot different scenarios, to visualise what is happening
 
 csv_index = 11 # Index of the run to plot for better visualisation
-csv_files_to_display = 10
+csv_files_to_display = 1
 
 for csv_index in range(0, min(len(data), csv_files_to_display)):
     # Assuming you have data for metrics and ground truth error
@@ -218,20 +240,20 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
 
     # Subplot 1: FIM vs. Measurement Index
     plt.subplot(3, 3, 1)
-    plt.plot(measurement_indices, data.iloc[csv_index]['inverse_fim_vector'], color='b', label='FIM')
+    plt.plot(measurement_indices, data.iloc[csv_index]['inverse_fim_vector'], color='b', label='FIM det')
     plt.yscale('log')
-    plt.ylabel('FIM', color='b')
+    plt.ylabel('FIM determinant', color='b')
     plt.tick_params(axis='y', colors='b')
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
 
-    plt.title('FIM vs. Ground Truth Error')
+    plt.title('FIM determinant vs. Ground Truth Error')
 
     # Subplot 2: GDOP vs. Measurement Index
     plt.subplot(3, 3, 2)
@@ -242,8 +264,8 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -254,18 +276,18 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
     plt.subplot(3, 3, 3)
     plt.plot(measurement_indices, data.iloc[csv_index]['residuals_vector'], color='b', label='RMS Residuals')
     plt.yscale('log')
-    plt.ylabel('RMS Residuals', color='b')
+    plt.ylabel('Median of Residuals', color='b')
     plt.tick_params(axis='y', colors='b')
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
 
-    plt.title('RMS Residuals vs. Ground Truth Error')
+    plt.title('Median of Residuals vs. Ground Truth Error')
 
     # Subplot 4: Condition Number vs. Measurement Index
     plt.subplot(3, 3, 4)
@@ -276,8 +298,8 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -288,18 +310,18 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
     plt.subplot(3, 3, 5)
     plt.plot(measurement_indices, data.iloc[csv_index]['covariances_vector'], color='b', label='Covariance Eigenvalues')
     plt.yscale('log')
-    plt.ylabel('Covariance Eigenvalues', color='b')
+    plt.ylabel('Max covariance value', color='b')
     plt.tick_params(axis='y', colors='b')
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
 
-    plt.title('Covariance Eigenvalues vs. Ground Truth Error')
+    plt.title('Max covariance of the Estimate vs. Ground Truth Error')
 
     # Subplot 6: Verification Vector vs. Measurement Index
     plt.subplot(3, 3, 6)
@@ -310,8 +332,8 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -320,15 +342,15 @@ for csv_index in range(0, min(len(data), csv_files_to_display)):
 
     # Subplot 7: Delta Pos Vector vs. Measurement Index
     plt.subplot(3, 3, 7)
-    plt.plot(measurement_indices, data.iloc[csv_index]['delta_pos_vector'], color='b', label='Delta Pos Vector')
+    plt.plot(measurement_indices, data.iloc[csv_index]['delta_pos_vector'], color='b', label='Position Delta Vector')
     plt.yscale('log')
     plt.ylabel('Delta Pos Vector', color='b')
     plt.tick_params(axis='y', colors='b')
 
     plt.twinx()
     plt.plot(measurement_indices, data.iloc[csv_index]['error_vector'], color='r', label='Ground Truth Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
-    plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['constant_bias_error_vector'], color='g', label='Ground Truth Constant bias Error')
+    # plt.plot(measurement_indices, data.iloc[csv_index]['linear_bias_error_vector'], color='k', label='Ground Truth Linear bias Error')
     plt.yscale('log')
     plt.ylabel('Ground Truth Error', color='r')
     plt.tick_params(axis='y', colors='r')
@@ -373,7 +395,7 @@ def extract_final_values(df, columns):
     
     return pd.DataFrame(final_values)
 
-metrics_columns = ['gdop_vector', 'inverse_fim_vector', 'condition_number_vector', 'residuals_vector', 'covariances_vector']
+metrics_columns = ['gdop_vector', 'inverse_fim_vector', 'condition_number_vector', 'residuals_vector', 'covariances_vector', 'verification_vector']
 final_values_df = extract_final_values(data, metrics_columns)
 
 def plot_metric_vs_error(df, metrics_columns):
@@ -386,6 +408,8 @@ def plot_metric_vs_error(df, metrics_columns):
         plt.title(f'{col} vs. Final Error')
         plt.xlabel(col)
         plt.ylabel('Final Error')
+        plt.xscale('log')
+        plt.ylim(1e-1, 5)
 
     plt.tight_layout()
     plt.show()

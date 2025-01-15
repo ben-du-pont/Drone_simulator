@@ -1,16 +1,12 @@
 import numpy as np
 from scipy.optimize import least_squares, minimize
+# from sklearn.mixture import GaussianMixture
+
+# from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
+from scipy.spatial.distance import euclidean
 
-from sklearn.cluster import KMeans
-
-
-from drone_uwb_simulator.UWB_protocol import Anchor
 from online_uwb_initialisation.trajectory_optimisation import TrajectoryOptimization
-
-from drone_uwb_simulator.drone_simulator import DroneSimulation
-
-from drone_uwb_simulator.drone_dynamics import Waypoint, Trajectory
 
 from copy import deepcopy
 import csv
@@ -70,14 +66,16 @@ class UwbOnlineInitialisation:
             "verification_vector_convergence_counter": 0,
             "consecutive_distances_vector_convergence_counter": 0,
 
-            "GMM": []
+            "GMM": [],
+
+            "optimal_waypoints": [],
         }
 
         # Dictionnary to store the measurements and estimations for each anchor using the template above
         self.anchor_measurements_dictionary = {}
 
         # Optimiser class instance to call to run the optimisation procedure
-        self.trajectory_optimiser = TrajectoryOptimization(method="FIM", bounds=[(0, 4), (-4, 4), (0.5, 4)], default_fim_noise_variance=0.4)
+        self.trajectory_optimiser = TrajectoryOptimization(method="FIM",  bounds=[(-1.5, 1.5), (-3.0, 3.0), (0.5, 2.0)], default_fim_noise_variance=0.4) 
 
         # Trajectory to follow
         self.passed_waypoints = []
@@ -94,18 +92,18 @@ class UwbOnlineInitialisation:
             # Measurement gathering parameters
             'distance_to_anchor_ratio_threshold': 0.03, # tangent ratio between consecutive measurements -> smaller is more measurements
             'number_of_redundant_measurements': 1, # Number of measurements to take at the same place or consecutively, ignoring the condition above
-            'distance_rejection_threshold': 10, # Minimum distance to the anchor to not reject the measurement
+            'distance_rejection_threshold': 20, # Minimum distance to the anchor to not reject the measurement
             
             # Least squares parameters
             'use_linear_bias': False, # Use linear bias in the linear least squares
-            'use_constant_bias': False, # Use constant bias in the linear least squares
+            'use_constant_bias': True, # Use constant bias in the linear least squares
             'normalised': False, # Use the normalised formulation for the linear least squares
 
             'regularise': True, # Regularise the least squares problem to keep the biases small
 
             'rough_estimate_method': "linear_reweighted", # Method to use for the rough estimate, either simple_linear or linear_reweighted or em_algorithm
             'outlier_removing': "None", # "None", "counter", "immediate" - Method to use for outlier removal where counter removes after a certain number of consecutive outliers, immediate removes the measurement immediately
-            'reweighting_iterations': 2, # Number of reweighting iterations for the reweighted least squares
+            'reweighting_iterations': 5, # Number of reweighting iterations for the reweighted least squares
             'use_trimmed_reweighted': True, # Use trimmed reweighted least squares for the rough estimate
 
             "weighting_function": "mad", # Method to use for the reweighting of the linear least squares problem, either huber, tukey, geman_mcclure, welsch, mad (best seem to be huber and geman_mcclure)
@@ -113,19 +111,19 @@ class UwbOnlineInitialisation:
             'tukey_c': 4.685,
             'welsch_c': 2.0,
 
-            'non_linear_optimisation_type': "EM", # Type of non linear optimisation to use, either IRLS or LM or KRR (does not work) or MM_Gaussian_Mixture
+            'non_linear_optimisation_type': "EM_new", # Type of non linear optimisation to use, either IRLS or LM or KRR (does not work) or MM_Gaussian_Mixture
 
             # Stopping criterion parameters
-            "stopping_criteria": ["nb_measurements"],
+            "stopping_criteria": ["nb_measurements"], #["GDOP"],
 
             # Absolute thresholds
             'FIM_thresh': 1e5,
-            'GDOP_thresh': 5,
+            'GDOP_thresh': 3,
             'residuals_thresh': 100,
             'condition_number_thresh': 5e5,
             'covariance_thresh': 10,
             'verification_vector_thresh': 10,
-            'number_of_measurements_thresh': 25,
+            'number_of_measurements_thresh': 30,
 
             # Relative thresholds
             'FIM_ratio_thresh': 1,
@@ -140,10 +138,10 @@ class UwbOnlineInitialisation:
             'convergence_counter_threshold': 3,
 
             # Outlier rejection parameters
-            "z_score_threshold": 3,
+            "z_score_threshold": 2,
             "outlier_count_threshold": 3, # Number of consecutive outliers to remove a measurement when using the counter method
 
-            "trajectory_optimisation_method": "FIM", # Type of trajectory optimisation to use, either GDOP or FIM
+            "trajectory_optimisation_method": "GDOP", # Type of trajectory optimisation to use, either GDOP or FIM
             "link_method": "strict_return", 
         }
     
@@ -683,8 +681,8 @@ class UwbOnlineInitialisation:
                 # estimator_previous = self.anchor_measurements_dictionary[anchor_id]["estimator_rough_linear"]
                 # x_previous = self.retrieve_least_square_result(estimator_previous)
                 # new_measurement_residual = b_new - A_new @ x_previous
-                new_measurement_weight = 1 #self.update_weights_huber(new_measurement_residual)[0] # or 1
-                
+                # new_measurement_weight = self.update_weights(new_measurement_residual)[0] # or 1
+                new_measurement_weight = 1
                 weights.append(new_measurement_weight)
             weights = np.ones(len(measurements))
 
@@ -699,8 +697,8 @@ class UwbOnlineInitialisation:
             if regularise:
                 lambda_vector[2] = 0
                 lambda_vector[3] = 100
-                lambda_vector[4] = 100
-                lambda_vector[5] = 1
+                lambda_vector[4] = 10
+                lambda_vector[5] = 10
                 reg_matrix = reg_matrix * lambda_vector
             else:
                 reg_matrix = np.zeros(A.shape[1])
@@ -728,8 +726,8 @@ class UwbOnlineInitialisation:
             
             if regularise:
                 # lambda_vector[2] = 100
-                lambda_vector[3] = 10
-                lambda_vector[4] = 10
+                lambda_vector[3] = 1000
+                lambda_vector[4] = 1000
                 reg_matrix = reg_matrix * lambda_vector
             else:
                 reg_matrix = np.zeros(A.shape[1])
@@ -752,7 +750,7 @@ class UwbOnlineInitialisation:
             
             if regularise:
                 # lambda_vector[2] = 100
-                lambda_vector[3] = 100
+                lambda_vector[3] = 1000
                 reg_matrix = reg_matrix * lambda_vector
             else:
                 reg_matrix = np.zeros(A.shape[1])
@@ -774,7 +772,7 @@ class UwbOnlineInitialisation:
             
             if regularise:
                 # lambda_vector[2] = 100
-                lambda_vector[3] = 100
+                lambda_vector[3] = 10
                 reg_matrix = reg_matrix * lambda_vector
             else:
                 reg_matrix = np.zeros(A.shape[1])
@@ -1006,9 +1004,9 @@ class UwbOnlineInitialisation:
 
                 # Compute the scale (MAD-based)
                 scale = compute_scale(residuals)
-                
+                print("IRLS SCALE", scale)
                 # Use Tukey's biweight function for weights
-                weights = tukey_weights_function(residuals, scale, c=4.685)
+                weights = huber_weights_function(residuals, scale)
 
                 sqrt_weights = np.sqrt(weights)
                 
@@ -1102,21 +1100,21 @@ class UwbOnlineInitialisation:
             def s_estimator_optimization(initial_guess, measurements):
                 # Adding an initial guess for scale, set to some initial value like MAD
                 mad_initial = compute_mad(loss_function(initial_guess, measurements))
-                initial_params = np.append(initial_guess, mad_initial)
-                
+                initial_params = np.append(initial_guess, 1.4826 *mad_initial)
                 result = minimize(loss_function_s_estimator, initial_params, args=(measurements,),
                                 method='L-BFGS-B',
-                                bounds=[(-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), 
-                                        (0.1, np.inf), (1e-6, np.inf)])  # bounds ensure scale is positive
+                                bounds=[(-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), (0, np.inf), 
+                                        (0.9, np.inf), (1e-6, 20)])  # bounds ensure scale is positive
                 params = result.x[:-1]  # Extract the optimized parameters
                 scale = result.x[-1]    # Extract the optimized scale
                 
                 return params, scale
 
-            def final_refined_estimation(params, measurements, initial_scale, c_final=1.345):
+            def final_refined_estimation(params, measurements, initial_scale, c_final=1.5):
                 """
                 Refine estimates using a more efficient M-estimator with a lower tuning constant.
                 """
+                print("initial scale", initial_scale)
                 def huber_weights_function(residuals, scale, c):
                     scaled_residuals = residuals / scale
                     abs_scaled_residuals = np.abs(scaled_residuals)
@@ -1144,7 +1142,7 @@ class UwbOnlineInitialisation:
             
             # Initial robust estimation using S-estimator
             initial_params, initial_scale = s_estimator_optimization(initial_guess, measurements)
-
+            initial_scale = 1.4826 * compute_mad(loss_function(initial_params, measurements))
             # Final efficient M-estimator refinement
             params = final_refined_estimation(initial_params, measurements, initial_scale)
             
@@ -1298,12 +1296,21 @@ class UwbOnlineInitialisation:
                 initial_params,
                 args=(measurements),
                 method='L-BFGS-B',
-                bounds=[(None, None), (None, None), (0, None), (None, None), (1.0, None),(0.8, 1.0), (0.01, None), (0.01, None), (0, None),(None, None)]
+                bounds=[(None, None), (None, None), (0, None), (-0.3, 0.3), (0.9, 1.1),(0.65, 1.0), (0.01, None), (0.02, None), (-2, 2),(-3, 3)]
             )
 
             # Estimated object position
             estimated_position = result.x[:3]
 
+            
+            print("Result of the gaussian mixture model optimization:")
+            print("gamma:", result.x[3])
+            print("beta:", result.x[4])
+            print("pi_los:", result.x[5])
+            print("sigma_los:", result.x[6])
+            print("sigma_nlos:", result.x[7])
+            print("mu_los:", result.x[8])
+            print("mu_nlos:", result.x[9])
             
             initial_params = np.hstack([initial_object_pos, initial_guess_beta, pi_los, sigma_los, 1, sigma_nlos, 1, mu_los, mu_nlos])
             result = minimize(
@@ -1313,6 +1320,8 @@ class UwbOnlineInitialisation:
                 method='L-BFGS-B',
                 bounds=[(None, None), (None, None), (0, None), (0, None), (0.5, 1.0), (0.01, None), (0.0, None), (0.01, None), (0.0, None), (0, None), (None, None)]
             )
+
+
             # estimated_position = result.x[:3]
             return np.concatenate((estimated_position, [0,1])), np.zeros((3,3))
         
@@ -1321,187 +1330,169 @@ class UwbOnlineInitialisation:
 
 
         elif optimisation_type == "EM_new":
-
-            def gaussian_pdf(x, mu, sigma):
-                return (1.0 / (np.sqrt(2 * np.pi) * sigma)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
             
-            def distance_dependant_noise_model(distance, sigma_0, alpha):
-                return sigma_0 + distance*alpha
-            
-            def log_likelihood(params, measurements):
-                """
-                Compute the log-likelihood of the data given the parameters for LoS and NLoS components.
-                
-                Parameters:
-                - params: list or numpy array containing the parameters [x0, y0, z0, mu_los, mu_nlos, sigma_los, sigma_nlos, alpha_los, alpha_nlos, pi_los, pi_nlos]
-                - measurements: numpy array of shape (n, 4), where each row is [x, y, z, range]
-                
-                Returns:
-                - log_likelihood: scalar, the computed log-likelihood value.
-                """
-                x0, y0, z0, mu_los, mu_nlos, sigma_los, sigma_nlos, alpha_los, alpha_nlos, logit_pi_los, logit_pi_nlos = params
-                
-                # Extract measurement data
-                measurement_positions = measurements[:, :3]  # [x, y, z]
-                ranges = measurements[:, 3]  # [range]
-                
-                pi_los = 1 / (1 + np.exp(-logit_pi_los))
-                pi_nlos = 1 / (1 + np.exp(-logit_pi_nlos))
+            def gaussian_likelihood_log(residuals, sigma, mu, eps=1e-6):
+                """Log of Gaussian likelihood for stability."""
+                return -0.5 * np.log(2 * np.pi * (sigma + eps)**2) - 0.5 * ((residuals - mu) / (sigma + eps))**2
+    
+            # GMM likelihood with distance-dependent model
+            def gmm_likelihood_distance_dependant(params, measurements):
+                # Extract parameters from the combined vector
+                object_pos = params[:3]
+                pi_los = params[3]
+                sigma_0_los = params[4]
+                alpha_los = params[5]
+                sigma_0_nlos = params[6]
+                alpha_nlos = params[7]
+                mu_0_los = params[8]
+                mu_0_nlos = params[9]
 
-                # Ensure they sum to 1
-                pi_sum = pi_los + pi_nlos
-                pi_los /= pi_sum
-                pi_nlos /= pi_sum
-
-                # Compute log-likelihood
-                log_likelihood = 0.0
                 n = len(measurements)
                 
-                for i in range(n):
-                    x_i = measurement_positions[i]
-                    r_i = ranges[i]
-                    
-                    # Compute the Euclidean distance from the object's position
-                    distance = np.linalg.norm([x_i[0] - x0, x_i[1] - y0, x_i[2] - z0])
-                    error = distance - r_i
-                    
-                    # Compute noise standard deviations
-                    sigma_los_actual = distance_dependant_noise_model(distance, sigma_los, alpha_los)
-                    sigma_nlos_actual = distance_dependant_noise_model(distance, sigma_nlos, alpha_nlos)
-                    
-                    # Compute the likelihoods for LoS and NLoS
-                    likelihood_los = gaussian_pdf(error, mu_los, sigma_los_actual)
-                    likelihood_nlos = gaussian_pdf(error, mu_nlos, sigma_nlos_actual)
-                    
-                    # Combine the likelihoods using the mixing coefficients
-                    weighted_likelihood = pi_los * likelihood_los + pi_nlos * likelihood_nlos
-                    
-                    # Avoid log(0) by adding a small constant
-                    log_likelihood += np.log(weighted_likelihood + 1e-10)
-                
-                return -log_likelihood  # Return negative log-likelihood for minimization
-            
+                # Ensure pi_los is within [0.01, 0.99]
+                pi_los = np.clip(pi_los, 0.001, 0.999)
+                pi_nlos = 1.0 - pi_los
 
-            def optimize_gmm_parameters(measurements, initial_params):
-                """
-                Optimize the parameters of the GMM and object position.
+                # Measurements
+                sensor_positions = measurements[:, :3]
+                ranges = measurements[:, 3]
                 
-                Parameters:
-                - measurements: numpy array of shape (n, 4), where each row is [x, y, z, range]
-                - initial_params: list or numpy array containing initial guesses for [x0, y0, z0, mu_los, mu_nlos, sigma_los, sigma_nlos, alpha_los, alpha_nlos, pi_los, pi_nlos]
+                # Compute distances from the object to each sensor
+                distances = np.linalg.norm(sensor_positions - object_pos, axis=1)
                 
-                Returns:
-                - result: scipy.optimize.OptimizeResult, result of the optimization.
-                """
-                bounds = [
-                    (None, None),  # x0
-                    (None, None),  # y0
-                    (None, None),  # z0
-                    (None, None),  # mu_los
-                    (None, None),  # mu_nlos
-                    (0.01, None),  # sigma_los
-                    (0.01, None),  # sigma_nlos
+                # Compute expected measurements
+                expected_ranges_los = distances  # For LOS, expected is the true distance
+                expected_ranges_nlos = distances  # For NLOS, expected is the same for distance comparison
+
+                # Residuals (difference between measured and expected ranges)
+                residuals_los = ranges - expected_ranges_los
+                residuals_nlos = ranges - expected_ranges_nlos
+
+                def z_score_outlier_detection(residuals, threshold=2):
+                    mean = np.mean(residuals)
+                    std = np.std(residuals)
+                    z_scores = (residuals - mean) / std
+                    outliers = np.where(np.abs(z_scores) > threshold)[0]
+                    return outliers
+                
+
+                # Outlier detection
+                outliers_los = z_score_outlier_detection(residuals_los)
+                outliers_nlos = z_score_outlier_detection(residuals_nlos)
+
+                # if they outlie both, set their weight to zero
+                outliers = np.intersect1d(outliers_los, outliers_nlos)
+                for outlier in outliers:
+                    residuals_los[outlier] = 0
+                    residuals_nlos[outlier] = 0
+
+
+
+                # Distance-dependent noise for LOS and NLOS
+                sigma_los = sigma_0_los + alpha_los * distances
+                sigma_nlos = sigma_0_nlos + alpha_nlos * distances
+                
+                # Means
+                mu_los = mu_0_los
+                mu_nlos = mu_0_nlos
+                
+                # Compute log-likelihood for LOS and NLOS components
+                los_log_prob = 1 * (np.log(pi_los) + gaussian_likelihood_log(residuals_los, sigma_los, mu_los))
+                nlos_log_prob = 1 * (np.log(pi_nlos) + gaussian_likelihood_log(residuals_nlos, sigma_nlos, mu_nlos))
+
+                # Use the log-sum-exp trick for numerical stability
+                log_likelihood = np.sum(np.logaddexp(los_log_prob, nlos_log_prob))
+
+                # Regularization to encourage sigma_nlos > sigma_los
+                regularization = np.sum(np.maximum(0, sigma_los - sigma_nlos))
+
+                return -(log_likelihood - regularization)  # We minimize the negative log-likelihood
+
+            # Initial guesses for the GMM parameters
+            initial_object_pos = initial_guess[:3]
+
+
+            def compute_residuals(params, measurements):
+                # Extract parameters from the combined vector
+                object_pos = params[:3]
+                gamma = params[3]
+                beta = params[4]
+                residuals = []
+                for measurement in measurements:
+                    d_i = np.linalg.norm(measurement[:3] - object_pos)
+                    residual = measurement[3] - d_i * beta - gamma
+                    residuals.append(residual)
+                return np.array(residuals)
+            
+            residuals = compute_residuals(initial_guess, measurements)
+
+            outliers = self.outlier_finder(residuals)
+            outlier_mask = np.zeros(len(residuals), dtype=bool)
+            outlier_mask[outliers] = True
+            
+            # los_measurements = [measurements[i] for i in range(len(measurements)) if i not in outliers]
+            # nlos_measurements = [measurements[i] for i in range(len(measurements)) if i in outliers]
+
+            
+            if len(outliers) > 0:
+                mu_los = np.mean(residuals[~outlier_mask])
+                mu_nlos = np.mean(residuals[outlier_mask])
+                sigma_los = np.std(residuals[~outlier_mask])
+                sigma_nlos = np.std(residuals[outlier_mask])
+                pi_los = 1 - len(outliers) / len(measurements)
+            else:
+                mu_los = np.mean(residuals)
+                mu_nlos = np.mean(residuals)
+                sigma_los = np.std(residuals)
+                sigma_nlos = np.std(residuals)
+                pi_los = 1.0
+
+            # Initial parameters for optimization
+            initial_params = np.array([
+                *initial_object_pos,
+                pi_los,
+                sigma_los,
+                0,
+                sigma_nlos,
+                0,
+                mu_los,
+                mu_nlos
+            ])
+
+            # Optimization process
+            result = minimize(
+                gmm_likelihood_distance_dependant,
+                initial_params,
+                args=(measurements,),
+                method='L-BFGS-B',
+                # method='Nelder-Mead',
+                bounds=[
+                    (None, None),  # Object position x
+                    (None, None),  # Object position y
+                    (None, None),  # Object position z
+                    (0.7, 0.999),  # pi_los
+                    (0.01, None),  # sigma_0_los
                     (0.0, None),  # alpha_los
+                    (0.01, None),  # sigma_0_nlos
                     (0.0, None),  # alpha_nlos
-                    (0, 1),  # pi_los
-                    (0, 1)   # pi_nlos
+                    (-0.5, 0.5),       # mu_0_los
+                    (-2, 2)        # mu_0_nlos
                 ]
-                result = minimize(log_likelihood, initial_params, args=(measurements,), method='L-BFGS-B', bounds=bounds)
-                
-                return result.x
+            )
+            print("Result of the gaussian mixture model optimization:")
+            print("pi_los:", result.x[3])
+            print("sigma_los:", result.x[4])
+            print("alpha_los:", result.x[5])
+            print("sigma_nlos:", result.x[6])
+            print("alpha_nlos:", result.x[7])
+            print("mu_los:", result.x[8])
+            print("mu_nlos:", result.x[9])
 
-            # Example usage
-            initial_params = [initial_guess[0], initial_guess[1], initial_guess[2], 0, 0, 0.01, 0.01, 1, 1, 0.9, 0.1]  # Example initial parameters
+            # Extract estimated position and parameters
+            estimated_position = result.x[:3]
 
-            optimized_params = optimize_gmm_parameters(measurements, initial_params)
+            return np.array([*estimated_position, 0, 1]), np.zeros((3,3))
 
-
-
-            return np.concatenate((optimized_params[:3], [0, 1])), np.zeros((3,3))
-
-                    
-
-
-
-
-        elif optimisation_type == "EM_iterative":
-            
-            def compute_distances(measurements, x_obj, y_obj, z_obj):
-                """
-                Computes the distance between the object and the sensor positions.
-                """
-                distances = np.sqrt((measurements[:, 0] - x_obj)**2 + 
-                                    (measurements[:, 1] - y_obj)**2 + 
-                                    (measurements[:, 2] - z_obj)**2)
-                return distances
-
-            # Function to fit a GMM to the residuals
-            def fit_gmm(residuals, n_components=3):
-                """
-                Fit a Gaussian Mixture Model (GMM) to the residuals.
-                """
-                gmm = GaussianMixture(n_components=n_components, covariance_type='full')
-                gmm.fit(residuals.reshape(-1, 1))  # GMM expects a 2D array, reshape the residuals
-                return gmm
-
-            # Function to update the object's position using weighted least squares
-            def update_position(measurements, gmm, responsibilities):
-                """
-                Update the object position using a weighted least squares approach.
-                """
-                def objective_function(position):
-                    x_obj, y_obj, z_obj = position
-                    predicted_ranges = compute_distances(measurements, x_obj, y_obj, z_obj)
-                    residuals = measurements[:, 3] - predicted_ranges
-                    weights = responsibilities[:, 0]  # LoS responsibilities (first component)
-                    return np.sum(weights * residuals**2)  # Weighted least squares
-
-                # Use scipy minimize to find the optimal position
-                initial_position = np.array([x0, y0, z0])
-                result = minimize(objective_function, initial_position, method='L-BFGS-B')
-                
-                return result.x  # Return the updated object position
-
-            # Main function implementing the iterative EM algorithm
-            def em_algorithm(measurements, x0, y0, z0, max_iterations=100, tol=1e-5):
-                """
-                The two-step iterative EM algorithm for GMM + object position estimation.
-                """
-                # Initialize object position
-                x_obj, y_obj, z_obj = x0, y0, z0
-                n_measurements = measurements.shape[0]
-                
-                for iteration in range(max_iterations):
-                    # Step 1: Compute residuals (difference between measured and predicted range)
-                    predicted_ranges = compute_distances(measurements, x_obj, y_obj, z_obj)
-                    residuals = measurements[:, 3] - predicted_ranges
-                    
-                    # Step 2: Fit GMM to residuals
-                    gmm = fit_gmm(residuals, n_components=3)
-                    
-                    # Step 3: Compute the responsibilities (probabilities for each component)
-                    responsibilities = gmm.predict_proba(residuals.reshape(-1, 1))
-                    
-                    # Step 4: Update the object position using the responsibilities (weighted least squares)
-                    new_position = update_position(measurements, gmm, responsibilities)
-                    
-                    # Convergence check
-                    position_change = np.linalg.norm(new_position - np.array([x_obj, y_obj, z_obj]))
-                    if position_change < tol:
-                        print(f"Converged after {iteration + 1} iterations")
-                        break
-                    
-                    # Update the object position for the next iteration
-                    x_obj, y_obj, z_obj = new_position
-                
-                # Final object position after EM algorithm
-                return x_obj, y_obj, z_obj, gmm
-
-            x0, y0, z0 = initial_guess[:3]
-
-            final_x, final_y, final_z, gmm = em_algorithm(measurements, x0, y0, z0)
-
-            return np.array([final_x, final_y, final_z, 0, 1]), np.zeros((3,3))
 
         elif optimisation_type == "EM_combined":
 
@@ -1650,6 +1641,86 @@ class UwbOnlineInitialisation:
 
             return np.array([final_x, final_y, final_z, 0, 1]), np.zeros((3,3))
 
+        elif optimisation_type == "EM_new_2":
+
+            # Assume we have a function to calculate true range given the object's position
+            def true_range(sensor_pos, object_pos):
+                return np.linalg.norm(sensor_pos - object_pos)
+
+            # Assume we have a linear distance-dependent noise model
+            def distance_dependent_noise(params, r_true):
+                alpha, beta = params  # params contain alpha and beta for the linear model
+                return np.sqrt(alpha + beta * r_true)
+
+            # Objective function: negative log likelihood of the GMM residuals + regularization term
+            def objective_function(params, measurements, gmm, alpha_reg=1e-3):
+                # Split params into object position and GMM params
+                X_obj = params[:3]  # Object position (X_obj, Y_obj, Z_obj)
+                gmm_params = params[3:]  # GMM weights, means, variances
+
+                # Calculate residuals: difference between true range and measured range
+                residuals = []
+                for (x_i, y_i, z_i, r_i) in measurements:
+                    sensor_pos = np.array([x_i, y_i, z_i])
+                    r_true = true_range(sensor_pos, X_obj)
+                    residuals.append(r_i - r_true)
+
+                residuals = np.array(residuals).reshape(-1, 1)
+                
+                # Calculate negative log-likelihood of GMM for residuals
+                nll = -gmm.score_samples(residuals).sum()
+
+                # Add regularization term (optional)
+                reg = alpha_reg * np.sum(np.square(params))  # L2 regularization
+                
+                return nll + reg
+
+            # Function to perform EM optimization
+            def em_optimization(measurements, initial_pos, initial_gmm_params, max_iter=100, tol=1e-4):
+                # Initialize the object position and GMM
+                X_obj = initial_pos
+                gmm = GaussianMixture(n_components=2, covariance_type='diag', init_params='random')
+
+                # Fit initial GMM to the residuals
+                residuals = [r_i - true_range(np.array([x_i, y_i, z_i]), X_obj) for (x_i, y_i, z_i, r_i) in measurements]
+                gmm.fit(np.array(residuals).reshape(-1, 1))
+
+                # Start EM iterations
+                for iteration in range(max_iter):
+                    # E-step: Compute responsibilities based on current residuals and GMM
+                    residuals = [r_i - true_range(np.array([x_i, y_i, z_i]), X_obj) for (x_i, y_i, z_i, r_i) in measurements]
+                    residuals = np.array(residuals).reshape(-1, 1)
+
+                    # Get current log likelihood
+                    gmm.weights_ = np.clip(gmm.weights_, 1e-6, 1.0)  # Ensure weights are positive and not too small
+                    current_nll = -gmm.score(residuals)
+
+                    # M-step: Minimize the negative log-likelihood and update parameters
+                    result = minimize(objective_function, 
+                                    x0=np.hstack((X_obj, gmm.weights_, gmm.means_.flatten(), np.sqrt(gmm.covariances_).flatten())),
+                                    args=(measurements, gmm),
+                                    method='L-BFGS-B',
+                                    options={'disp': False})
+
+                    # Update object position and GMM parameters
+                    final_x, final_y, final_z = result.x[:3]
+                    gmm_params = result.x[3:]
+
+                    # Update GMM with new parameters
+                    gmm.weights_ = gmm_params[:gmm.n_components]
+                    gmm.means_ = gmm_params[gmm.n_components:2*gmm.n_components].reshape(-1, 1)
+                    gmm.covariances_ = np.square(gmm_params[2*gmm.n_components:]).reshape(-1, 1)
+
+                    # Check for convergence
+                    if abs(current_nll - result.fun) < tol:
+                        print(f"Converged at iteration {iteration}")
+                        break
+
+                return np.array([final_x, final_y, final_z, 0, 1]), np.zeros((3,3))
+            
+            initial_pos = initial_guess[:3]
+            return em_optimization(measurements, initial_pos, None)
+
 
 
     def find_closest_anchor_in_optimisation_queue(self, drone_position):
@@ -1722,7 +1793,7 @@ class UwbOnlineInitialisation:
             anchor_measurement_dictionary = self.anchor_measurements_dictionary[anchor_id] # Extract the anchor's dictionnary 
             number_of_measurements = len(anchor_measurement_dictionary["distances_pre_rough_estimate"])
 
-            if number_of_measurements > 10: # Threshold to start the rough estimates
+            if number_of_measurements > 20: # Threshold to start the rough estimates
                 
                 # Transform the measurements from the positions and range measurements to tuples
                 measurements = []
@@ -1754,10 +1825,10 @@ class UwbOnlineInitialisation:
                 # Compute the stopping criterion variables
                 FIM = self.compute_FIM(measurements, estimator, np.diag(covariance_matrix)[:3])
                 GDOP = self.compute_GDOP(measurements, estimator[:3])
-                mean_residuals = np.mean(np.abs(residuals))
+                mean_residuals = np.median(np.abs(residuals))
                 condition_number = self.compute_condition_number(measurements)
-                covariances = np.diag(covariance_matrix)
-                verification_value = 0 # x[0]**2 + x[1]**2 + x[2]**2 - estimator[3]**2/estimator[4]**2 + x[5] # Internal residual verification, this should be zero
+                covariances = np.diag(covariance_matrix)[:3]
+                verification_value = self.compute_verification_vector(x)
                 distance_delta = np.linalg.norm(np.array(estimator[:3]) - np.array(anchor_measurement_dictionary["estimator_rough_linear"][:3])) # Distance between two consecutive estimates
 
                 # Add them to the dictionnary for plotting
@@ -1816,7 +1887,7 @@ class UwbOnlineInitialisation:
                     link_method = self.params["link_method"]
 
                     # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
-                    optimal_waypoints = self.trajectory_optimiser.optimize_waypoints_incrementally_spherical(drone_position, estimator, anchor_estimate_variance, previous_measurement_positions, initial_remaining_waypoints, radius_of_search = 0.2, max_waypoints=20, marginal_gain_threshold=0.01)
+                    optimal_waypoints = self.trajectory_optimiser.optimize_waypoints_incrementally_spherical(drone_position, estimator, anchor_estimate_variance, previous_measurement_positions, initial_remaining_waypoints, radius_of_search = 0.2, max_waypoints=20, marginal_gain_threshold=0.0001)
                     
                     return_waypoints = None
                     if link_method == "optimal":
@@ -1843,8 +1914,10 @@ class UwbOnlineInitialisation:
                    
 
                     self.current_optimal_waypoints = optimal_waypoints
+                    self.anchor_measurements_dictionary[anchor_id]["optimal_waypoints"] = optimal_waypoints
+
                     self.current_link_waypoints = link_waypoints
-                    self.remaining_waypoints = mission_waypoints
+                    self.remaining_waypoints = full_waypoints # mission_waypoints
 
                     return full_waypoints
 
@@ -1963,7 +2036,7 @@ class UwbOnlineInitialisation:
                 link_method = self.params["link_method"]
                 
                 # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
-                optimal_waypoints = self.trajectory_optimiser.optimize_waypoints_incrementally_spherical(optimal_trajectory_starting_point, estimator, anchor_estimate_variance, previous_measurement_positions, initial_remaining_waypoints, radius_of_search = 0.2, max_waypoints=20, marginal_gain_threshold=0.01)
+                optimal_waypoints = self.trajectory_optimiser.optimize_waypoints_incrementally_spherical(optimal_trajectory_starting_point, estimator, anchor_estimate_variance, previous_measurement_positions, initial_remaining_waypoints, radius_of_search = 0.2, max_waypoints=20, marginal_gain_threshold=0.0001)
                 return_waypoints = None
                 if link_method == "optimal":
                     optimal_waypoints, return_waypoints = self.trajectory_optimiser.optimize_return_waypoints_incrementally_spherical(optimal_waypoints[-1], estimator, anchor_estimate_variance, previous_measurement_positions, initial_remaining_waypoints[0], radius_of_search = 0.2, max_waypoints=20, marginal_gain_threshold=0.01, lambda_penalty=1)
@@ -1979,9 +2052,10 @@ class UwbOnlineInitialisation:
                     self.current_optimal_waypoints = optimal_waypoints + return_waypoints
                 else:
                     self.current_optimal_waypoints = optimal_waypoints
+                    self.anchor_measurements_dictionary[anchor_id]["optimal_waypoints"] = optimal_waypoints
 
                 self.current_link_waypoints = link_waypoints
-                self.remaining_waypoints = mission_waypoints
+                self.remaining_waypoints = full_waypoints # mission_waypoints
                 
 
                 return full_waypoints
@@ -1995,6 +2069,16 @@ class UwbOnlineInitialisation:
 
             if len(self.current_optimal_waypoints) == 0:
                 
+                measurements = []
+                for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):
+                    x, y, z = position
+                    measurements.append([x, y, z, distance])
+
+                estimator, covariance_matrix = self.estimate_anchor_position_non_linear_least_squares(measurements, initial_guess=anchor_measurement_dictionary["estimator_rough_non_linear"])
+
+                anchor_measurement_dictionary["estimator"] = estimator
+                anchor_measurement_dictionary["covariance_matrix"] = covariance_matrix
+
                 anchor_measurement_dictionary["status"] = "initialised"
                 print(f"Anchor {anchor_id} is now initialised")
                 # Update the status of the drone to open to measurements
@@ -2009,9 +2093,9 @@ class UwbOnlineInitialisation:
             # process the measurement on the optimal trajectory
             self.process_measurement_optimal_trajectory(drone_position, distance, anchor_id) # Decide what to do with the measurement
 
-            
+            if np.array(self.passed_waypoints[-1] == self.current_optimal_waypoints[-1]).all() and len(self.current_optimal_waypoints) < 2:
             # If all measurements on the optimal trajectory are collected, run the final estimate and set it as initialised
-            if np.linalg.norm(np.array(drone_position) - np.array([self.current_optimal_waypoints[-1][0], self.current_optimal_waypoints[-1][1], self.current_optimal_waypoints[-1][2]])) < 0.01:
+            #if np.linalg.norm(np.array(drone_position) - np.array([self.current_optimal_waypoints[-1][0], self.current_optimal_waypoints[-1][1], self.current_optimal_waypoints[-1][2]])) < 0.01:
             #if np.linalg.norm(np.array(drone_position) - np.array([self.current_link_waypoints[-1][0], self.current_link_waypoints[-1][1], self.current_link_waypoints[-1][2]])) < 0.001:
 
                 measurements = []
@@ -2303,22 +2387,22 @@ class UwbOnlineInitialisation:
         outliers = np.where(np.abs(z_score) > threshold)[0]
         return outliers
 
-    def cluster_measurements(self, measurements, number_of_clusters=15):
-        """Cluster the measurements using the KMeans algorithm
+    # def cluster_measurements(self, measurements, number_of_clusters=15):
+    #     """Cluster the measurements using the KMeans algorithm
 
-        Parameters:
-        - measurements: numpy array, the measurements to cluster
-        - number_of_clusters: int, the number of clusters to use for the KMeans algorithm
+    #     Parameters:
+    #     - measurements: numpy array, the measurements to cluster
+    #     - number_of_clusters: int, the number of clusters to use for the KMeans algorithm
 
-        Returns:
-        - centroids: numpy array, the centroids of the clusters
-        """
+    #     Returns:
+    #     - centroids: numpy array, the centroids of the clusters
+    #     """
 
-        kmeans = KMeans(n_clusters=number_of_clusters)
-        kmeans.fit_predict(measurements)
-        centroids = kmeans.cluster_centers_
+    #     kmeans = KMeans(n_clusters=number_of_clusters)
+    #     kmeans.fit_predict(measurements)
+    #     centroids = kmeans.cluster_centers_
 
-        return centroids
+    #     return centroids
 
     def outlier_filtering(self, anchor_measurement_dictionary, residuals, method):
         """Filter the outliers in the measurements using the z-score method

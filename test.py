@@ -4,15 +4,16 @@ import matplotlib.pyplot as plt
 import csv
 import pandas as pd
 
-anchor_1_gt = [2.357514, -0.369072, 0.335518]
-anchor_2_gt = [6.996823, -1.347588, 0.869851]
-anchor_3_gt = [5.068104, 4.253319, 0.733376]
-anchor_4_gt = [1.841671, 3.997815, 1.975195]
+
+anchor_1_gt = [-2.486, -1.746, 0.252]
+anchor_2_gt = [3.045, -1.366, 0.900]
+anchor_3_gt = [-2.795, 1.065, 2.005]
+anchor_4_gt = [2.859, 2.447, 2.146]
 
 
-calculated_position_1 = [2.015162325081294,-0.5623643223101559, 0.0]
+calculated_position_1 = [-2.311557875876655,-1.865119492663806,0.33172133027699147]
 calculated_position_2 = [7.207018642291071,-1.5073402457661933,0.566961083157065]
-calculated_position_3 = [5.343282242921421,3.883223009688919,0.268959260786815]
+calculated_position_3 = [-2.7301439512596835,0.5357063324674097,2.343093086745037]
 calculated_position_4 = [1.6176539611172795,3.75427714950098,2.294142285846655]
 
 error1 = np.linalg.norm(np.array(anchor_1_gt) - np.array(calculated_position_1))
@@ -50,8 +51,8 @@ data = pd.read_csv(csv_file)
 
 anchor_to_show = 1
 # Step 2: Calculate the Euclidean norm (L2 norm) of the (x, y, z) coordinates
-data['norm'] = np.linalg.norm(np.array(data[['x', 'y', 'z']].values) - np.array(anchor_4_gt), axis=1)
-data['norm_estimated'] = np.linalg.norm(np.array(data[['x', 'y', 'z']].values) - np.array(calculated_position_4), axis=1)
+data['norm'] = np.linalg.norm(np.array(data[['x', 'y', 'z']].values) - np.array(anchor_1_gt), axis=1)
+data['norm_estimated'] = np.linalg.norm(np.array(data[['x', 'y', 'z']].values) - np.array(calculated_position_1), axis=1)
 # Step 3: Create a scatter plot of 'distance' vs 'norm'
 plt.figure(figsize=(8, 6))
 plt.plot(data['distance'],color='blue', label='Distance')
