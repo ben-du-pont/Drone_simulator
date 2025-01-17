@@ -11,7 +11,7 @@ import tf2_ros
 
 import threading
 
-from drone_uwb_simulator.drone_simulator import DroneSimulation
+from drone_uwb_simulator.drone_simulator import DroneSimulation, SimulationConfig
 
 class DroneSimulationNode(Node):
     def __init__(self):
@@ -33,7 +33,9 @@ class DroneSimulationNode(Node):
         self.optimised_trajectory_subscription = self.create_subscription(Path,'drone_optimised_trajectory', self.optimised_trajectory_callback, 10)
 
         # Create the drone simulation object
-        self.drone_simulation = DroneSimulation(drone_speed=3)
+        sim_config = SimulationConfig(dt=0.1, drone_speed=3)
+        
+        self.drone_simulation = DroneSimulation(sim_config)
 
         # Fill the anchor information to be sent to the estimator in the service
         self.fill_anchor_info()
@@ -60,22 +62,22 @@ class DroneSimulationNode(Node):
         self.unknown_anchor_noise_variances = []  # List of noise variances
 
         for anchor in self.drone_simulation.base_anchors:
-            self.known_anchor_IDs.append(anchor.anchor_ID)
-            self.known_anchor_x_positions.append(anchor.x)
-            self.known_anchor_y_positions.append(anchor.y)
-            self.known_anchor_z_positions.append(anchor.z)
-            self.known_anchor_biases.append(anchor.bias)
-            self.known_anchor_linear_biases.append(anchor.linear_bias)
-            self.known_anchor_noise_variances.append(anchor.noise_variance)
+            self.known_anchor_IDs.append(anchor.anchor_id)
+            self.known_anchor_x_positions.append(anchor.position[0])
+            self.known_anchor_y_positions.append(anchor.position[1])
+            self.known_anchor_z_positions.append(anchor.position[2])
+            self.known_anchor_biases.append(anchor.bias_model.constant_bias)
+            self.known_anchor_linear_biases.append(anchor.bias_model.linear_bias)
+            self.known_anchor_noise_variances.append(anchor.noise_model.variance)
 
         for anchor in self.drone_simulation.unknown_anchors:
-            self.unknown_anchor_IDs.append(anchor.anchor_ID)
-            self.unknown_anchor_x_positions.append(anchor.x)
-            self.unknown_anchor_y_positions.append(anchor.y)
-            self.unknown_anchor_z_positions.append(anchor.z)
-            self.unknown_anchor_biases.append(anchor.bias)
-            self.unknown_anchor_linear_biases.append(anchor.linear_bias)
-            self.unknown_anchor_noise_variances.append(anchor.noise_variance)
+            self.unknown_anchor_IDs.append(anchor.anchor_id)
+            self.unknown_anchor_x_positions.append(anchor.position[0])
+            self.unknown_anchor_y_positions.append(anchor.position[1])
+            self.unknown_anchor_z_positions.append(anchor.position[2])
+            self.unknown_anchor_biases.append(anchor.bias_model.constant_bias)
+            self.unknown_anchor_linear_biases.append(anchor.bias_model.linear_bias)
+            self.unknown_anchor_noise_variances.append(anchor.noise_model.variance)
 
     def get_anchor_info_callback(self, request, response):
         response.known_anchor_ids = self.known_anchor_IDs
@@ -114,7 +116,7 @@ class DroneSimulationNode(Node):
     def run_simulation(self):
         """ Main loop for the simulation."""
 
-        rate = self.create_rate(1/self.drone_simulation.dt)  # Publish rate 
+        rate = self.create_rate(1/self.drone_simulation.config.dt)  # Publish rate 
 
         self.drone_trajectory_initial = self.drone_simulation.drone_trajectory.spline_x, self.drone_simulation.drone_trajectory.spline_y, self.drone_simulation.drone_trajectory.spline_z
         
@@ -127,7 +129,7 @@ class DroneSimulationNode(Node):
             
             # Update drone position
             new_x, new_y, new_z = self.drone_simulation.update_drone_position_kinematic()
-            waypoints_achieved = len(self.drone_simulation.waypoints) - len(self.drone_simulation.get_remaining_waypoints([new_x, new_y, new_z]))
+            waypoints_achieved = len(self.drone_simulation.waypoints) - len(self.drone_simulation.get_remaining_waypoints())
 
 
             # Publish drone position
@@ -169,10 +171,10 @@ class DroneSimulationNode(Node):
             tf_msg = TransformStamped()
             tf_msg.header.stamp = self.get_clock().now().to_msg()
             tf_msg.header.frame_id = 'world'
-            tf_msg.child_frame_id = f'anchor_{anchor.anchor_ID}'
-            tf_msg.transform.translation.x = float(anchor.x)
-            tf_msg.transform.translation.y = float(anchor.y)
-            tf_msg.transform.translation.z = float(anchor.z)
+            tf_msg.child_frame_id = f'anchor_{anchor.anchor_id}'
+            tf_msg.transform.translation.x = float(anchor.position[0])
+            tf_msg.transform.translation.y = float(anchor.position[1])
+            tf_msg.transform.translation.z = float(anchor.position[2])
             tf_msg.transform.rotation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
             self.tf_broadcaster.sendTransform(tf_msg)
 
@@ -180,10 +182,10 @@ class DroneSimulationNode(Node):
             tf_msg = TransformStamped()
             tf_msg.header.stamp = self.get_clock().now().to_msg()
             tf_msg.header.frame_id = 'world'
-            tf_msg.child_frame_id = f'unknown_anchor_{anchor.anchor_ID}'
-            tf_msg.transform.translation.x = float(anchor.x)
-            tf_msg.transform.translation.y = float(anchor.y)
-            tf_msg.transform.translation.z = float(anchor.z)
+            tf_msg.child_frame_id = f'unknown_anchor_{anchor.anchor_id}'
+            tf_msg.transform.translation.x = float(anchor.position[0])
+            tf_msg.transform.translation.y = float(anchor.position[1])
+            tf_msg.transform.translation.z = float(anchor.position[2])
             tf_msg.transform.rotation = Quaternion(w=1.0, x=0.0, y=0.0, z=0.0)
             self.tf_broadcaster.sendTransform(tf_msg)
 

@@ -12,6 +12,809 @@ from copy import deepcopy
 import csv
 
 
+
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional, Union, Any, Set
+import numpy as np
+import numpy.typing as npt
+from datetime import datetime
+import warnings
+
+
+
+@dataclass
+class UwbConfig:
+    """Configuration parameters for UWB initialization and estimation.
+
+    Attributes:
+        distance_to_anchor_ratio_threshold: Tangent ratio between consecutive measurements -> smaller is more measurements.
+        number_of_redundant_measurements: Number of measurements to take at the same place or consecutively, ignoring the condition above.
+        distance_rejection_threshold: Minimum distance to the anchor to not reject the measurement.
+        use_linear_bias: Use linear bias in the linear least squares.
+        use_constant_bias: Use constant bias in the linear least squares.
+        normalised: Use the normalised formulation for the linear least squares.
+        regularise: Regularise the least squares problem to keep the biases small.
+        rough_estimate_method: Method to use for the rough estimate, either simple_linear or linear_reweighted or em_algorithm.
+        outlier_removing: Method to use for outlier removal where counter removes after a certain number of consecutive outliers, immediate removes the measurement immediately.
+        reweighting_iterations: Number of reweighting iterations for the reweighted least squares.
+        use_trimmed_reweighted: Use trimmed reweighted least squares for the rough estimate.
+        weighting_function: Method to use for the reweighting of the linear least squares problem, either huber, tukey, geman_mcclure, welsch, mad.
+        huber_delta: Delta parameter for the Huber weighting function.
+        tukey_c: C parameter for the Tukey weighting function.
+        welsch_c: C parameter for the Welsch weighting function.
+        non_linear_optimisation_type: Type of non-linear optimisation to use, either IRLS or LM or KRR or MM_Gaussian_Mixture.
+        stopping_criteria: List of criteria to use for stopping the measurement collection.
+        FIM_thresh: Threshold for the Fisher Information Matrix.
+        GDOP_thresh: Threshold for the Geometric Dilution of Precision.
+        residuals_thresh: Threshold for the residuals.
+        condition_number_thresh: Threshold for the condition number.
+        covariance_thresh: Threshold for the covariance.
+        verification_vector_thresh: Threshold for the verification vector.
+        number_of_measurements_thresh: Threshold for the number of measurements.
+        FIM_ratio_thresh: Ratio threshold for the Fisher Information Matrix.
+        GDOP_ratio_thresh: Ratio threshold for the Geometric Dilution of Precision.
+        residuals_ratio_thresh: Ratio threshold for the residuals.
+        condition_number_ratio_thresh: Ratio threshold for the condition number.
+        covariance_ratio_thresh: Ratio threshold for the covariance.
+        convergence_postion_thresh: Threshold for the convergence position.
+        verification_vector_ratio_thresh: Ratio threshold for the verification vector.
+        convergence_counter_threshold: Number of times in a row the delta between two consecutive values for the criterion is below the threshold.
+        z_score_threshold: Z-score threshold for outlier rejection.
+        outlier_count_threshold: Number of consecutive outliers to remove a measurement when using the counter method.
+        trajectory_optimisation_method: Type of trajectory optimisation to use, either GDOP or FIM.
+        link_method: Method to use for linking waypoints, either strict_return or optimal.
+    """
+    # Measurement gathering parameters
+    distance_to_anchor_ratio_threshold: float = 0.03
+    number_of_redundant_measurements: int = 1
+    distance_rejection_threshold: float = 20.0
+
+    # Least squares parameters
+    use_linear_bias: bool = False
+    use_constant_bias: bool = True
+    normalised: bool = False
+    regularise: bool = True
+
+    rough_estimate_method: str = "linear_reweighted"
+    outlier_removing: str = "None"
+    reweighting_iterations: int = 5
+    use_trimmed_reweighted: bool = True
+
+    weighting_function: str = "mad"
+    huber_delta: float = 0.01
+    tukey_c: float = 4.685
+    welsch_c: float = 2.0
+
+    non_linear_optimisation_type: str = "EM_new"
+
+    # Stopping criterion parameters
+    stopping_criteria: list = ["nb_measurements"]
+
+    # Absolute thresholds
+    FIM_thresh: float = 1e5
+    GDOP_thresh: float = 3.0
+    residuals_thresh: float = 100.0
+    condition_number_thresh: float = 5e5
+    covariance_thresh: float = 10.0
+    verification_vector_thresh: float = 10.0
+    number_of_measurements_thresh: int = 30
+
+    # Relative thresholds
+    FIM_ratio_thresh: float = 1.0
+    GDOP_ratio_thresh: float = 0.2
+    residuals_ratio_thresh: float = 1.0
+    condition_number_ratio_thresh: float = 0.1
+    covariance_ratio_thresh: float = 1.0
+    convergence_postion_thresh: float = 1.0
+    verification_vector_ratio_thresh: float = 0.1
+
+    # Convergence counters threshold - i.e how many times in a row the delta between two consecutive values for the criterion is below the threshold
+    convergence_counter_threshold: int = 3
+
+    # Outlier rejection parameters
+    z_score_threshold: float = 2.0
+    outlier_count_threshold: int = 3
+
+    # Trajectory optimisation parameters
+    trajectory_optimisation_method: str = "GDOP"
+    link_method: str = "strict_return"
+    
+
+@dataclass
+class AnchorMeasurements:
+    """Container for measurements associated with a single anchor.
+    
+    Attributes:
+        measurements: Array of measurements [N x 5] containing [x, y, z, distance, timestamp]
+        is_filtered: Set of measurement indices that have been marked as filtered/invalid
+        metadata: Dictionary containing additional information about measurements
+    """
+    measurements: npt.NDArray[np.float64] = field(default_factory=lambda: np.array([]))
+    is_filtered: Set[int] = field(default_factory=set)
+    metadata: Dict = field(default_factory=dict)
+
+
+class UwbMeasurementManager:
+    """Handles collection, storage, and preprocessing of UWB measurements."""
+
+    def __init__(self, config: UwbConfig) -> None:
+        """Initialize the measurement manager.
+
+        Args:
+            config: Configuration parameters for measurement handling.
+        """
+        self.config = config
+        # Store measurements for each anchor in a dictionary
+        self._measurements: Dict[str, AnchorMeasurements] = {}
+        
+    def add_measurement(
+        self, 
+        anchor_id: str, 
+        position: npt.NDArray[np.float64], 
+        distance: float,
+        timestamp: Optional[float] = None
+    ) -> bool:
+        """Add a new UWB measurement to the storage.
+
+        Args:
+            anchor_id: Unique identifier of the anchor.
+            position: Position of the drone [x, y, z].
+            distance: Measured distance to the anchor.
+            timestamp: Optional timestamp of the measurement (uses current time if None).
+
+        Returns:
+            bool: True if measurement was successfully added, False if discarded.
+
+        Raises:
+            ValueError: If measurement values are invalid.
+        """
+        # Input validation
+        if not isinstance(position, np.ndarray) or position.shape != (3,):
+            raise ValueError("Position must be a numpy array of shape (3,)")
+        if distance < 0:
+            raise ValueError("Distance cannot be negative")
+        
+        # Use current timestamp if none provided
+        if timestamp is None:
+            timestamp = datetime.now().timestamp()
+
+        # Create measurement array
+        measurement = np.concatenate([position, [distance, timestamp]])
+
+        # Initialize anchor measurements if not exists
+        if anchor_id not in self._measurements:
+            self._measurements[anchor_id] = AnchorMeasurements()
+
+        if self.discard_measurement(anchor_id, measurement):
+            return False
+        
+        # Add measurement to storage
+        if len(self._measurements[anchor_id].measurements) == 0:
+            self._measurements[anchor_id].measurements = measurement.reshape(1, -1)
+        else:
+            self._measurements[anchor_id].measurements = np.vstack([
+                self._measurements[anchor_id].measurements,
+                measurement
+            ])
+
+        return True
+
+    def discard_measurement(self, anchor_id: str, measurement: npt.NDArray[np.float64]) -> bool:
+        """Check if a measurement should be discarded based on the configuration.
+        
+        Args:
+            anchor_id: Unique identifier of the anchor.
+            measurement: Measurement to check [x, y, z, distance, timestamp].
+
+        Returns:
+            bool: True if measurement should be discarded.
+        """
+        pass
+
+    def get_measurements(
+        self, 
+        anchor_id: str, 
+        start_time: Optional[float] = None, 
+        end_time: Optional[float] = None,
+        include_filtered: bool = False
+    ) -> npt.NDArray[np.float64]:
+        """Retrieve measurements for a specific anchor within time range.
+
+        Args:
+            anchor_id: Unique identifier of the anchor.
+            start_time: Start time for measurement retrieval.
+            end_time: End time for measurement retrieval.
+            include_filtered: Whether to include filtered measurements.
+
+        Returns:
+            Array of measurements in format [x, y, z, distance, timestamp].
+
+        Raises:
+            KeyError: If anchor_id does not exist.
+        """
+        if anchor_id not in self._measurements:
+            raise KeyError(f"No measurements found for anchor {anchor_id}")
+
+        measurements = self._measurements[anchor_id].measurements
+        if len(measurements) == 0:
+            return np.array([])
+
+        # Apply time filter if specified
+        mask = np.ones(len(measurements), dtype=bool)
+        if start_time is not None:
+            mask &= measurements[:, 4] >= start_time
+        if end_time is not None:
+            mask &= measurements[:, 4] <= end_time
+
+        # Apply filtered measurements mask if needed
+        if not include_filtered:
+            filtered_mask = np.ones(len(measurements), dtype=bool)
+            filtered_mask[list(self._measurements[anchor_id].is_filtered)] = False
+            mask &= filtered_mask
+
+        return measurements[mask]
+
+    def get_estimation_ready_measurements(
+        self,
+        anchor_id: str
+    ) -> npt.NDArray[np.float64]:
+        """Get measurements in format ready for estimation algorithms.
+
+        Args:
+            anchor_id: Unique identifier of the anchor.
+
+        Returns:
+            Array of measurements in format [x, y, z, distance] (without timestamps).
+        """
+        measurements = self.get_measurements(anchor_id, include_filtered=False)
+        if len(measurements) == 0:
+            return np.array([])
+        return measurements[:, :4]  # Return only position and distance columns
+
+    def filter_measurements(
+        self, 
+        anchor_id: str, 
+        method: str = "mad",
+        threshold: float = 3.0
+    ) -> None:
+        """Filter measurements to remove outliers.
+
+        Args:
+            anchor_id: Unique identifier of the anchor.
+            method: Filtering method ('mad', 'zscore', 'distance').
+            threshold: Threshold for outlier detection.
+
+        Raises:
+            ValueError: If invalid method specified.
+        """
+        if anchor_id not in self._measurements:
+            return
+
+        measurements = self._measurements[anchor_id].measurements
+        if len(measurements) == 0:
+            return
+
+        if method == "mad":
+            # Median Absolute Deviation filtering
+            distances = measurements[:, 3]
+            median = np.median(distances)
+            mad = np.median(np.abs(distances - median))
+            modified_zscore = 0.6745 * (distances - median) / mad
+            outliers = np.where(np.abs(modified_zscore) > threshold)[0]
+
+        elif method == "zscore":
+            # Z-score filtering
+            distances = measurements[:, 3]
+            zscore = (distances - np.mean(distances)) / np.std(distances)
+            outliers = np.where(np.abs(zscore) > threshold)[0]
+
+        elif method == "distance":
+            # Distance-based filtering using the config threshold
+            outliers = np.where(measurements[:, 3] > self.config.rejection_threshold)[0]
+
+        else:
+            raise ValueError(f"Unknown filtering method: {method}")
+
+        # Update filtered measurements set
+        self._measurements[anchor_id].is_filtered.update(outliers)
+
+    def compute_measurement_quality_metrics(
+        self,
+        anchor_id: str
+    ) -> Dict[str, float]:
+        """Compute quality metrics for measurements.
+
+        Args:
+            anchor_id: Unique identifier of the anchor.
+
+        Returns:
+            Dictionary containing quality metrics:
+                - number_of_measurements
+                - measurement_spread
+                - average_distance
+                - distance_std
+        """
+        if anchor_id not in self._measurements:
+            return {
+                "number_of_measurements": 0,
+                "measurement_spread": 0.0,
+                "average_distance": 0.0,
+                "distance_std": 0.0
+            }
+
+        measurements = self.get_measurements(anchor_id, include_filtered=False)
+        if len(measurements) == 0:
+            return {
+                "number_of_measurements": 0,
+                "measurement_spread": 0.0,
+                "average_distance": 0.0,
+                "distance_std": 0.0
+            }
+
+        positions = measurements[:, :3]
+        distances = measurements[:, 3]
+
+        # Compute spread of measurement positions
+        centroid = np.mean(positions, axis=0)
+        spreads = np.linalg.norm(positions - centroid, axis=1)
+        max_spread = np.max(spreads)
+
+        return {
+            "number_of_measurements": len(measurements),
+            "measurement_spread": float(max_spread),
+            "average_distance": float(np.mean(distances)),
+            "distance_std": float(np.std(distances))
+        }
+
+    def clear_measurements(self, anchor_id: Optional[str] = None) -> None:
+        """Clear measurements from storage.
+
+        Args:
+            anchor_id: If provided, clear only measurements for this anchor.
+        """
+        if anchor_id is not None:
+            if anchor_id in self._measurements:
+                del self._measurements[anchor_id]
+        else:
+            self._measurements.clear()
+
+class UwbEstimator:
+    """Handles various estimation algorithms for UWB anchor position."""
+
+    def __init__(self, config: UwbConfig) -> None:
+        """Initialize the estimator.
+
+        Args:
+            config: Configuration parameters for estimation algorithms.
+        """
+        self.config = config
+
+    def setup_linear_least_square(
+        self,
+        measurements: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Setup the linear least squares problem.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+
+        Returns:
+            Tuple containing:
+                - Matrix A for the linear least squares problem
+                - Vector b for the linear least squares problem
+        """
+        
+        use_linear_bias = self.config.use_linear_bias
+        use_constant_bias = self.config.use_constant_bias
+
+        # Normalised formulation (only works for both biases)
+        if self.config.normalised:
+            A = []
+            b = []
+
+            for measurement in measurements:
+                x, y, z, measured_dist = measurement[0:4]
+                norm_squared = x**2 + y**2 + z**2
+                A.append([2*x, 2*y, 2*z, measured_dist**2, -2*measured_dist, -norm_squared])
+                b.append(1)
+
+            return np.array(A), np.array(b)
+
+
+        if use_constant_bias and use_linear_bias:
+            A = []
+            b = []
+            for measurement in measurements:
+                x, y, z, measured_dist = measurement[0:4]
+                norm_squared = x**2 + y**2 + z**2
+                A.append([2*x, 2*y, 2*z, measured_dist**2, -2*measured_dist, 1])
+                b.append(norm_squared)
+
+        elif use_constant_bias:
+            A = []
+            b = []
+            for measurement in measurements:
+                x, y, z, measured_dist = measurement[0:4]
+                norm_squared = x**2 + y**2 + z**2
+                A.append([-2*x, -2*y, -2*z, 2*measured_dist, 1])
+                b.append(measured_dist**2 - norm_squared)
+
+        elif use_linear_bias:
+            A = []
+            b = []
+            for measurement in measurements:
+                x, y, z, measured_dist = measurement[0:4]
+                norm_squared = x**2 + y**2 + z**2
+                A.append([2*x, 2*y, 2*z, measured_dist**2, 1])
+                b.append(norm_squared)
+
+        else:
+
+            A = []
+            b = []
+            for measurement in measurements:
+                x, y, z, measured_dist = measurement[0:4]
+                norm_squared = x**2 + y**2 + z**2
+                A.append([-2*x, -2*y, -2*z, 1])
+                b.append(measured_dist**2 - norm_squared)
+
+
+        return np.array(A), np.array(b)
+            
+    def estimate_linear_least_squares(
+        self, 
+        measurements: npt.NDArray[np.float64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Estimate anchor position using linear least squares.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+
+        Returns:
+            Tuple containing:
+                - Estimated position and bias parameters
+                - Covariance matrix
+                - Residuals
+                - x: Estimated parameters of the linear least squares problem
+        """
+        use_constant_bias = self.config.use_constant_bias
+        use_linear_bias = self.config.use_linear_bias
+    
+        def compute_covariance_matrix_linear_least_squares(A, b, x):
+            """Compute the covariance matrix of the parameters for linear least squares
+            
+            Parameters:
+            - A: numpy array, the matrix A of the linear least squares problem
+            - b: numpy array, the vector b of the linear least squares problem
+            - x: numpy array, the estimated parameters of the linear least squares problem
+            
+            Returns:
+            - covariance_matrix: numpy array, the computed covariance matrix
+            """
+            
+            residual_sum_of_squares = np.sum((b - A @ x)**2)
+            dof = A.shape[0] - A.shape[1]
+            sigma_hat_squared = residual_sum_of_squares / dof
+            covariance_matrix = sigma_hat_squared * np.linalg.pinv(A.T @ A)
+
+            return covariance_matrix
+        
+        def compute_residuals(A, b, x):
+            """Compute the residuals of the linear least squares problem given the matrix A, the vector b and the estimated parameters x
+
+            Parameters:
+            - A: numpy array, the matrix A of the linear least squares problem
+            - b: numpy array, the vector b of the linear least squares problem
+            - x: numpy array, the estimated parameters of the linear least squares problem
+
+            Returns:
+            - residuals: numpy array, the computed residuals
+            """
+
+            return np.array((b - A @ x))
+
+        A, b = self.setup_linear_least_square(measurements)
+
+        # Normalised formulation, only works for both biases
+        if self.config.normalised:
+            x = np.linalg.lstsq(A, b, rcond=None)[0]
+            squared_norm_of_anchor = x[5]
+            position = x[:3] / squared_norm_of_anchor
+
+            beta_squared = 1/(x[3]*squared_norm_of_anchor)
+
+            bias = x[4]/x[3]
+            linear_bias = np.sqrt(beta_squared)
+
+            return np.concatenate((position, [bias, linear_bias])), compute_covariance_matrix_linear_least_squares(A, b, x), compute_residuals(A, b, x), x
+
+        if use_constant_bias and use_linear_bias:
+
+            x = np.linalg.lstsq(A, b, rcond=None)[0]
+            #x = np.linalg.inv(A.T @ A) @ A.T @ b
+            squared_linear_bias = x[3] if x[3] > 0 else 1
+            linear_bias = np.sqrt(1/squared_linear_bias)
+
+            bias = x[4]/squared_linear_bias
+            position = x[:3]
+
+            return np.concatenate((position, [bias, linear_bias])), compute_covariance_matrix_linear_least_squares(A, b, x), compute_residuals(A, b, x), x
+        
+        elif use_constant_bias:
+
+            x = np.linalg.lstsq(A, b, rcond=None)[0]
+            #x = np.linalg.inv(A.T @ A) @ A.T @ b
+            position = x[:3]
+            bias = x[3]
+
+            return np.concatenate((position, [bias, 1])), compute_covariance_matrix_linear_least_squares(A, b, x), compute_residuals(A, b, x), x
+        
+        elif use_linear_bias:
+
+            x = np.linalg.lstsq(A, b, rcond=None)[0]
+            #x = np.linalg.inv(A.T @ A) @ A.T @ b
+            squared_linear_bias = x[3] if x[3] > 0 else 1
+            linear_bias = np.sqrt(1/squared_linear_bias)
+            position = x[:3]
+
+            return np.concatenate((position, [0, linear_bias])), compute_covariance_matrix_linear_least_squares(A, b, x), compute_residuals(A, b, x), x
+        
+        else:
+
+            x = np.linalg.lstsq(A, b, rcond=None)[0]
+            #x = np.linalg.inv(A.T @ A) @ A.T @ b
+            position = x[:3]
+
+            return np.concatenate((position, [0, 1])), compute_covariance_matrix_linear_least_squares(A, b, x), compute_residuals(A, b, x), x
+
+    def estimate_weighted_least_squares(
+        self, 
+        measurements: npt.NDArray[np.float64],
+        weights: Optional[npt.NDArray[np.float64]] = None
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Estimate anchor position using weighted least squares.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+            weights: Optional weights for measurements.
+
+        Returns:
+            Tuple containing:
+                - Estimated position and bias parameters
+                - Covariance matrix
+                - Residuals
+        """
+        pass
+
+    def update_weights(
+        self, 
+        residuals: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Update measurement weights based on residuals.
+
+        Args:
+            residuals: Array of residuals from previous estimation.
+
+        Returns:
+            Updated weights for measurements.
+        """
+        pass
+
+    def estimate_trimmed_least_squares(
+        self, 
+        measurements: npt.NDArray[np.float64],
+        weights: Optional[npt.NDArray[np.float64]] = None
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Estimate anchor position using trimmed least squares.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+            weights: Optional weights for measurements.
+
+        Returns:
+            Tuple containing:
+                - Estimated position and bias parameters
+                - Covariance matrix
+                - Residuals
+        """
+        pass
+
+class UwbOptimizer:
+    """Handles trajectory optimization for UWB initialization."""
+
+    def __init__(self, config: UwbConfig) -> None:
+        """Initialize the optimizer.
+
+        Args:
+            config: Configuration parameters for trajectory optimization.
+        """
+        pass
+
+    def optimize_trajectory(
+        self, 
+        current_position: npt.NDArray[np.float64],
+        anchor_estimate: npt.NDArray[np.float64],
+        method: str = "FIM"
+    ) -> npt.NDArray[np.float64]:
+        """Optimize trajectory for better anchor position estimation.
+
+        Args:
+            current_position: Current drone position [x, y, z].
+            anchor_estimate: Current anchor position estimate.
+            method: Optimization criterion ('FIM' or 'GDOP').
+
+        Returns:
+            Array of optimal waypoints [N x 3].
+        """
+        pass
+
+    def generate_link_trajectory(
+        self, 
+        start_position: npt.NDArray[np.float64],
+        end_position: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Generate trajectory between optimization waypoints.
+
+        Args:
+            start_position: Start position [x, y, z].
+            end_position: End position [x, y, z].
+
+        Returns:
+            Array of trajectory waypoints.
+        """
+        pass
+
+class UwbMetricsCalculator:
+    """Handles calculation of various UWB estimation metrics."""
+
+    def __init__(self, config: UwbConfig) -> None:
+        """Initialize the metrics calculator.
+
+        Args:
+            config: Configuration parameters for metrics calculation.
+        """
+        self.config = config
+
+    def compute_gdop(
+        self, 
+        measurements: npt.NDArray[np.float64], 
+        anchor_position: npt.NDArray[np.float64]
+    ) -> float:
+        """Compute Geometric Dilution of Precision.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+            anchor_position: Estimated anchor position [x, y, z].
+
+        Returns:
+            GDOP value.
+        """
+        
+        if len(measurements) < 4:
+            return float('inf')
+        
+        x,y,z = anchor_position
+        A = []
+        for measurement in measurements:
+            x_i, y_i, z_i, _ = measurement
+            R = np.linalg.norm([x_i-x, y_i-y, z_i-z])
+            A.append([(x_i-x)/R, (y_i-y)/R, (z_i-z)/R, 1])
+
+        A = np.array(A)
+
+        try:
+            inv_at_a = np.linalg.inv(A.T @ A)
+            gdop = np.sqrt(np.trace(inv_at_a))
+            if gdop is not None:
+                return gdop
+            else:
+                return float('inf')
+        except np.linalg.LinAlgError:
+            return float('inf')  # Matrix is singular, cannot compute GDOP
+
+    def compute_fim(
+        self, 
+        measurements: npt.NDArray[np.float64],
+        anchor_position: npt.NDArray[np.float64],
+        noise_variance: float
+    ) -> npt.NDArray[np.float64]:
+        """Compute Fisher Information Matrix.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+            anchor_position: Estimated anchor position [x, y, z].
+            noise_variance: Measurement noise variance.
+
+        Returns:
+            Fisher Information Matrix.
+        """
+        x0, y0, z0 = anchor_position[:3]
+        measurements = np.array(measurements)
+        measurements = measurements[:,:3] # Remove measurements with 0 distance
+        noise_variance = 0.4 # self.fim_noise_variance # Default noise variance
+
+        # Compute distances between measurements and target
+        z_m = np.linalg.norm(measurements - np.array([x0, y0, z0]), axis=1)
+
+        # Differences in x, y, z coordinates
+        x_differences = x0 - measurements[:, 0]
+        y_differences = y0 - measurements[:, 1]
+        z_differences = z0 - measurements[:, 2]
+
+        # Compute derivatives dzm_dx, dzm_dy, dzm_dz (no need for np.newaxis)
+        dzm_dx = x_differences / z_m
+        dzm_dy = y_differences / z_m
+        dzm_dz = z_differences / z_m
+
+        # Create the noise covariance matrix
+        C_q = noise_variance * np.diag((1 + z_m)**2)
+        
+        # Invert C_q
+        inv_C_q = np.linalg.inv(C_q)
+
+        # Compute derivatives of C with respect to x, y, and z
+        dC_dx = noise_variance * np.diag((1 + z_m) / z_m * x_differences)
+        dC_dy = noise_variance * np.diag((1 + z_m) / z_m * y_differences)
+        dC_dz = noise_variance * np.diag((1 + z_m) / z_m * z_differences)
+
+        # Initialize Fisher Information Matrix (FIM)
+        FIM = np.zeros((3, 3))
+
+        # Compute the diagonal terms of FIM
+        FIM[0, 0] = dzm_dx.T @ inv_C_q @ dzm_dx + 0.5 * np.trace(inv_C_q @ dC_dx @ inv_C_q @ dC_dx)
+        FIM[1, 1] = dzm_dy.T @ inv_C_q @ dzm_dy + 0.5 * np.trace(inv_C_q @ dC_dy @ inv_C_q @ dC_dy)
+        FIM[2, 2] = dzm_dz.T @ inv_C_q @ dzm_dz + 0.5 * np.trace(inv_C_q @ dC_dz @ inv_C_q @ dC_dz)
+
+        # Compute the off-diagonal terms (cross-terms)
+        FIM[0, 1] = dzm_dx.T @ inv_C_q @ dzm_dy + 0.5 * np.trace(inv_C_q @ dC_dx @ inv_C_q @ dC_dy)
+        FIM[0, 2] = dzm_dx.T @ inv_C_q @ dzm_dz + 0.5 * np.trace(inv_C_q @ dC_dx @ inv_C_q @ dC_dz)
+        FIM[1, 2] = dzm_dy.T @ inv_C_q @ dzm_dz + 0.5 * np.trace(inv_C_q @ dC_dy @ inv_C_q @ dC_dz)
+
+        # Fill the symmetric terms
+        FIM[1, 0] = FIM[0, 1]
+        FIM[2, 0] = FIM[0, 2]
+        FIM[2, 1] = FIM[1, 2]
+        
+        return FIM
+
+    def compute_condition_number(
+        self, 
+        measurements: npt.NDArray[np.float64]
+    ) -> float:
+        """Compute condition number of the measurement matrix.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+
+        Returns:
+            Condition number.
+        """
+        A, _ = self.setup_linear_least_square(measurements)
+        # U, s, Vt = np.linalg.svd(A)
+        # sigma_max = max(s)
+        # sigma_min = min(s)
+        # condition_number = sigma_max / sigma_min
+
+        condition_number = np.linalg.cond(A)
+        
+        return condition_number
+
+    def compute_residuals(
+        self,
+        measurements: npt.NDArray[np.float64],
+        estimator: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Compute residuals between measurements and estimates.
+
+        Args:
+            measurements: Array of measurements [x, y, z, distance].
+            estimator: Estimated parameters [x, y, z, bias, scale].
+
+        Returns:
+            Array of residuals.
+        """
+        pass
+
 class UwbOnlineInitialisation:
 
     def __init__(self):
@@ -297,7 +1100,6 @@ class UwbOnlineInitialisation:
         return mad
 
 
-
     def setup_linear_least_square(self, measurements):
         """Setup the linear least squares problem given a set of measurements, using the parameters set in the class for deciding on wether on not to include bias terms
 
@@ -460,9 +1262,6 @@ class UwbOnlineInitialisation:
 
             return p_a - norm**2
             
-            
-
-        
 
     def update_weights(self, residuals):
         """Update the weights based on the residuals of the previous estimation.
@@ -2387,22 +3186,6 @@ class UwbOnlineInitialisation:
         outliers = np.where(np.abs(z_score) > threshold)[0]
         return outliers
 
-    # def cluster_measurements(self, measurements, number_of_clusters=15):
-    #     """Cluster the measurements using the KMeans algorithm
-
-    #     Parameters:
-    #     - measurements: numpy array, the measurements to cluster
-    #     - number_of_clusters: int, the number of clusters to use for the KMeans algorithm
-
-    #     Returns:
-    #     - centroids: numpy array, the centroids of the clusters
-    #     """
-
-    #     kmeans = KMeans(n_clusters=number_of_clusters)
-    #     kmeans.fit_predict(measurements)
-    #     centroids = kmeans.cluster_centers_
-
-    #     return centroids
 
     def outlier_filtering(self, anchor_measurement_dictionary, residuals, method):
         """Filter the outliers in the measurements using the z-score method

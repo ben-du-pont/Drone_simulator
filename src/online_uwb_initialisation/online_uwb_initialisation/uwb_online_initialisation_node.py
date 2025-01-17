@@ -6,7 +6,7 @@ from sim_interfaces.msg import StampedFloat, DronePosition
 from sim_interfaces.srv import AnchorInfo, TrajectoryInfo
 from nav_msgs.msg import Path
 
-from drone_uwb_simulator.UWB_protocol import Anchor
+from drone_uwb_simulator.UWB_protocol import Anchor, BiasModel, NoiseModel, UWBNetwork
 from drone_uwb_simulator.drone_dynamics import Waypoint
 from online_uwb_initialisation.uwb_online_initialisation import UwbOnlineInitialisation
 import numpy as np
@@ -88,10 +88,9 @@ class UwbOnlineInitialisationNode(Node):
         if future.result() is not None:
             response = future.result()
 
-            self.uwb_online_initialisation.trajectory_waypoints = [Waypoint(x, y, z) for x, y, z in zip(response.waypoints_x, response.waypoints_y, response.waypoints_z)]
-            self.uwb_online_initialisation.trajectory.construct_trajectory_spline(self.uwb_online_initialisation.trajectory_waypoints)
+            self.uwb_online_initialisation.passed_waypoints = [response.waypoints_x[0], response.waypoints_y[0], response.waypoints_z[0]]
+            self.uwb_online_initialisation.remaining_waypoints = [[x, y, z] for x, y, z in zip(response.waypoints_x[1:], response.waypoints_y[1:], response.waypoints_z[1:])]
 
-            self.uwb_online_initialisation.optimised_trajectory_waypoints = self.uwb_online_initialisation.trajectory_waypoints
 
             self.get_logger().info('Succesfully got trajectory information')
 
@@ -103,19 +102,23 @@ class UwbOnlineInitialisationNode(Node):
         number_of_unknown_anchors = len(self.unknown_anchor_x_positions)
 
         for i in range(number_of_known_anchors):
-            anchor = Anchor(self.known_anchor_IDs[i], self.known_anchor_x_positions[i], self.known_anchor_y_positions[i], self.known_anchor_z_positions[i], self.known_anchor_biases[i], self.known_anchor_linear_biases[i], self.known_anchor_noise_variances[i])
-            self.base_anchors[anchor.anchor_ID] = anchor
+            bias_model = BiasModel(self.known_anchor_biases[i], self.known_anchor_linear_biases[i])
+            noise_model = NoiseModel(self.known_anchor_noise_variances[i])
+            anchor = Anchor(self.known_anchor_IDs[i], self.known_anchor_x_positions[i], self.known_anchor_y_positions[i], self.known_anchor_z_positions[i], bias_model, noise_model)
+            self.base_anchors[anchor.anchor_id] = anchor
         
         for i in range(number_of_unknown_anchors):
-            anchor = Anchor(self.unknown_anchor_IDs[i], self.unknown_anchor_x_positions[i], self.unknown_anchor_y_positions[i], self.unknown_anchor_z_positions[i], self.unknown_anchor_biases[i], self.unknown_anchor_linear_biases[i], self.unknown_anchor_noise_variances[i])
-            self.unknown_anchors[anchor.anchor_ID] = anchor
-            self.anchor_status_dictionnary[anchor.anchor_ID] = "unseen"
+            bias_model = BiasModel(self.unknown_anchor_biases[i], self.unknown_anchor_linear_biases[i])
+            noise_model = NoiseModel(self.unknown_anchor_noise_variances[i])
+            anchor = Anchor(self.unknown_anchor_IDs[i], self.unknown_anchor_x_positions[i], self.unknown_anchor_y_positions[i], self.unknown_anchor_z_positions[i], bias_model, noise_model)
+            self.unknown_anchors[anchor.anchor_id] = anchor
+            self.anchor_status_dictionnary[anchor.anchor_id] = "unseen"
 
 
 
 
     def get_anchor_range_measurement(self, drone_position, anchor_ID):
-        distance = self.unknown_anchors[anchor_ID].request_distance(drone_position[0], drone_position[1], drone_position[2])
+        distance = self.unknown_anchors[anchor_ID].measure_distance(drone_position)
         return distance 
 
     def drone_position_callback(self, msg):
@@ -133,7 +136,7 @@ class UwbOnlineInitialisationNode(Node):
 
         first_key = next(iter(self.uwb_online_initialisation.anchor_measurements_dictionary))
 
-        error = self.uwb_online_initialisation.calculate_position_error(self.unknown_anchors[first_key].get_anchor_coordinates(), self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator"][:3])
+        error = self.uwb_online_initialisation.calculate_position_error(self.unknown_anchors[first_key].position, self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["estimator"][:3])
         
         if len(self.uwb_online_initialisation.anchor_measurements_dictionary[first_key]["GDOP"]) > 0:
 
@@ -175,9 +178,9 @@ class UwbOnlineInitialisationNode(Node):
 
         self.publish_optimised_trajectory_waypoints()
 
-        if self.uwb_online_initialisation.spline_x is not None:
-            self.publish_optimised_spline(self.uwb_online_initialisation.spline_x, self.uwb_online_initialisation.spline_y, self.uwb_online_initialisation.spline_z)
-            self.uwb_online_initialisation.spline_x = None
+        # if self.uwb_online_initialisation.spline_x is not None:
+        #     self.publish_optimised_spline(self.uwb_online_initialisation.spline_x, self.uwb_online_initialisation.spline_y, self.uwb_online_initialisation.spline_z)
+        #     self.uwb_online_initialisation.spline_x = None
 
     def anchor_status_change_callback(self, anchor_ID, status):
         self.anchor_status_dictionnary[anchor_ID] = status
@@ -193,7 +196,7 @@ class UwbOnlineInitialisationNode(Node):
     def publish_optimised_trajectory_waypoints(self):
         marker_array = MarkerArray()
 
-        for i, point in enumerate(self.uwb_online_initialisation.optimised_trajectory_waypoints):
+        for i, point in enumerate(self.uwb_online_initialisation.current_optimal_waypoints):
             marker = Marker()
             marker.header.frame_id = "world"
             marker.type = Marker.SPHERE
@@ -203,9 +206,9 @@ class UwbOnlineInitialisationNode(Node):
             marker.scale.z = 0.1
             marker.color.a = 1.0
             marker.color.r = 1.0  # red color
-            marker.pose.position.x = float(point.x)
-            marker.pose.position.y = float(point.y)
-            marker.pose.position.z = float(point.z)
+            marker.pose.position.x = float(point[0])
+            marker.pose.position.y = float(point[1])
+            marker.pose.position.z = float(point[2])
             marker.id = i
             marker_array.markers.append(marker)
 
